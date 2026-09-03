@@ -1,0 +1,62 @@
+name: League Market Scheduler
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: league-market-scheduler
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-scheduled-jobs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run due market jobs
+        env:
+          LEAGUE_MARKET_URL: ${{ secrets.LEAGUE_MARKET_URL }}
+          LEAGUE_MARKET_ADMIN_CODE: ${{ secrets.LEAGUE_MARKET_ADMIN_CODE }}
+        run: |
+          set -euo pipefail
+          test -n "$LEAGUE_MARKET_URL"
+          test -n "$LEAGUE_MARKET_ADMIN_CODE"
+          curl --fail-with-body --silent --show-error \
+            --retry 4 --retry-all-errors \
+            --connect-timeout 15 --max-time 90 \
+            "${LEAGUE_MARKET_URL%/}/api/health"
+          response="$(curl --fail-with-body --silent --show-error \
+            --retry 2 --retry-all-errors \
+            --connect-timeout 15 --max-time 480 \
+            --request POST \
+            --header "X-Admin-Code: $LEAGUE_MARKET_ADMIN_CODE" \
+            "${LEAGUE_MARKET_URL%/}/api/admin/scheduled/run")"
+          SCHEDULE_RESPONSE="$response" python3 - <<'PY'
+          import json
+          import os
+
+          payload = json.loads(os.environ["SCHEDULE_RESPONSE"])
+          completed = payload.get("completed") or []
+          lifecycle = (payload.get("results") or {}).get("lifecycle")
+          if "lifecycle" not in completed or not isinstance(lifecycle, dict):
+              raise SystemExit("Scheduler response did not include a completed lifecycle job")
+          required = {"closed", "resolved", "voided", "checked_at"}
+          missing = sorted(required - lifecycle.keys())
+          if missing:
+              raise SystemExit(f"Lifecycle result is missing: {', '.join(missing)}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("## League Market scheduler\n\n")
+                  handle.write(f"- Checked: `{payload.get('checked_at', 'unknown')}`\n")
+                  handle.write(f"- Completed: `{', '.join(completed)}`\n")
+                  handle.write(f"- Closed: `{lifecycle['closed']}`\n")
+                  handle.write(f"- Resolved: `{len(lifecycle['resolved'])}`\n")
+                  handle.write(f"- Voided: `{len(lifecycle['voided'])}`\n")
+          print(json.dumps(payload, indent=2))
+          PY

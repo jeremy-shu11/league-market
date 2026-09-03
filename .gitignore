@@ -1,0 +1,11 @@
+.env
+node_modules/
+playwright-report/
+test-results/
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.sqlite
+data/raw/
+data/backups/
+__pycache__/
+*.pyc

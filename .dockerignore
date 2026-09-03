@@ -1,0 +1,8 @@
+.env
+.git
+node_modules
+playwright-report
+test-results
+data/*.sqlite*
+__pycache__
+*.pyc

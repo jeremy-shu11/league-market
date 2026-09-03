@@ -1,0 +1,21 @@
+{
+  "name": "league-market",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Closed play-money prediction market for a fantasy football league",
+  "scripts": {
+    "dev": "python3 backend/app.py",
+    "vendor:icons": "cp node_modules/lucide/dist/umd/lucide.min.js frontend/vendor/lucide.min.js",
+    "test:backend": "PYTHONPYCACHEPREFIX=/private/tmp/league-market-pycache PYTHONPATH=backend python3 -m unittest tests/test_backend.py",
+    "test:e2e": "playwright test",
+    "qa:automation": "PYTHONPYCACHEPREFIX=/private/tmp/league-market-pycache PYTHONPATH=backend python3 -m unittest tests.test_backend.ApiTests.test_weekly_lifecycle_rehearsal_closes_settles_pays_and_refunds",
+    "qa:production": "node tests/production-rehearsal.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "lucide": "^1.37.0"
+  }
+}
