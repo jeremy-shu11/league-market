@@ -1,4 +1,4 @@
-# League Market
+# The League Market
 
 Closed, play-money prediction exchange for a Sleeper fantasy football league. Opening odds are generated from league scoring, legal lineups, weekly projections, standings, schedule, and prior-season score volatility. Trading uses a model-prior-anchored LMSR; refreshed models remain visible as fair value without repricing existing positions.
 
@@ -22,6 +22,18 @@ Override them with environment variables:
 ```bash
 LEAGUE_MARKET_INVITE_CODE=your-code LEAGUE_MARKET_ADMIN_CODE=your-admin-code python3 backend/app.py
 ```
+
+## Nuxt Shell
+
+The prediction-market UI now has a Nuxt/Nuxt UI shell around the existing trading runtime. The FastAPI app serves the generated Nuxt public output when `.output/public/index.html` exists, then falls back to `frontend/index.html` for local backend-only work.
+
+```bash
+npm run dev:nuxt
+npm run generate:nuxt
+python3 backend/app.py
+```
+
+`npm run dev:nuxt` proxies `/api` to the FastAPI server on `127.0.0.1:5065`. Run `python3 backend/app.py` in another terminal when using the Nuxt dev server. `npm run generate:nuxt` refreshes the legacy runtime copy for Nuxt dev assets and writes the static Nuxt bundle used by FastAPI.
 
 ## Tests
 
@@ -60,14 +72,39 @@ docker run --rm -p 5065:5065 \
 
 The SQLite database lives at `LEAGUE_MARKET_DB`; mount its parent directory as persistent storage. Run one application process against that database. Put TLS and request-rate limiting at the reverse proxy, and use `/api/health` for health checks.
 
+## Free Vercel-Style Deploy
+
+Pure Vercel hosting cannot safely persist the local SQLite file. For a free, multi-user launch, use Vercel Hobby for the FastAPI/Nuxt app and Turso free for shared SQLite-compatible storage.
+
+1. Create a Turso database and token.
+2. Import this repository into Vercel with the project root set to `league-market`.
+3. Keep the included `vercel.json`; it runs `npm run generate:nuxt` and routes all requests through the FastAPI function at `api/index.py`.
+4. Add these Vercel environment variables:
+
+```text
+LEAGUE_MARKET_ENV=production
+LEAGUE_MARKET_INVITE_CODE=<12+ character private invite>
+LEAGUE_MARKET_ADMIN_CODE=<16+ character private admin code>
+LEAGUE_MARKET_ALLOWED_HOSTS=<your-app>.vercel.app
+LEAGUE_MARKET_ALLOWED_ORIGINS=https://<your-app>.vercel.app
+LEAGUE_MARKET_SCHEDULE_PIPELINE=0
+TURSO_DATABASE_URL=libsql://...
+TURSO_AUTH_TOKEN=...
+LEAGUE_MARKET_DATA_DIR=/tmp/league-market
+```
+
+For a custom domain, add it to both `LEAGUE_MARKET_ALLOWED_HOSTS` and `LEAGUE_MARKET_ALLOWED_ORIGINS`. Vercel Hobby cron cannot run every 15 minutes, so keep `.github/workflows/league-market-scheduler.yml` enabled and set its repository secrets after the Vercel URL is live. Keep `LEAGUE_MARKET_SCHEDULE_PIPELINE=0` on serverless deployments unless the model refresh is moved to a runner with a longer execution window.
+
 Runtime settings:
 
 - `LEAGUE_MARKET_ENV`: `development`, `test`, or `production`
 - `LEAGUE_MARKET_HOST` / `LEAGUE_MARKET_PORT`: bind address and port
 - `LEAGUE_MARKET_DB`: persistent SQLite file path
+- `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`: optional remote libSQL database for serverless hosts
 - `LEAGUE_MARKET_RAW_DATA`: content-addressed gzip ingestion artifacts
 - `LEAGUE_MARKET_BACKUP_DIR`: SQLite online backups
 - `LEAGUE_MARKET_SIMULATIONS`: deterministic Monte Carlo sample count; default `20000`
+- `LEAGUE_MARKET_SCHEDULE_PIPELINE`: set `0` to keep scheduled automation from running the heavier model pipeline
 - `LEAGUE_MARKET_INVITE_CODE`: 12+ characters in production
 - `LEAGUE_MARKET_ADMIN_CODE`: 16+ characters in production
 - `LEAGUE_MARKET_ALLOWED_HOSTS`: comma-separated HTTP hostnames
@@ -85,20 +122,20 @@ ingest -> validate -> model -> draft/version -> publish -> close -> resolve|void
 
 The projection policy is Sleeper live, then same-week last-known-good data under 24 hours, then a freshness-checked nflverse/dynastyprocess rankings adapter. Rankings-only data still fails publication when the league's custom stat categories cannot be modeled. Fixtures are test-only and are never a production fallback.
 
-The canonical scheduler target is `POST /api/admin/scheduled/run` with the `X-Admin-Code` header. Call it every 15 minutes. Each invocation runs lifecycle checks, then conditionally runs the model pipeline every 12 hours and backup/prune every 24 hours. Jobs are serialized, persisted in `job_runs`, and reported in Admin.
+The canonical scheduler target is `POST /api/admin/scheduled/run` with the `X-Admin-Code` header. Call it every 15 minutes. Each invocation runs lifecycle checks, live Sleeper score marks for active weekly markets, then conditionally runs backup/prune every 24 hours. If `LEAGUE_MARKET_SCHEDULE_PIPELINE=1`, it also runs the model pipeline every 12 hours. Jobs are serialized, persisted in `job_runs`, and reported in Admin.
 
 The included `.github/workflows/league-market-scheduler.yml` provides that schedule. It health-checks the host, calls the canonical scheduler endpoint, validates that lifecycle completed with the expected result fields, and writes counts to the GitHub Actions job summary. Add repository secrets:
 
 - `LEAGUE_MARKET_URL`: the public HTTPS origin, without an API path
 - `LEAGUE_MARKET_ADMIN_CODE`: the production admin code
 
-The individual pipeline, lifecycle, backup, and prune endpoints remain available for focused retries.
+The individual pipeline, live score mark, lifecycle, backup, and prune endpoints remain available for focused retries.
 
 ## Restore Drill
 
 Backups are written to a temporary file, checked with `PRAGMA integrity_check`, and atomically renamed only after validation. To restore, stop the single application writer, preserve the current database, copy the selected backup to `LEAGUE_MARKET_DB`, verify it with `sqlite3 "$LEAGUE_MARKET_DB" 'PRAGMA integrity_check;'`, and restart the application. Never restore while the application process is writing.
 
-The lifecycle job closes weekly markets at the first NFL kickoff. At Tuesday 1:00 AM ET it fetches the finalized Sleeper matchup scores and settles each weekly high/low market in the same run. Exact official ties are voided and refunded. Manual commissioner resolution remains available only for manually originated contracts.
+Weekly markets close at the first NFL kickoff assumption or, for irregular weeks, as soon as Sleeper begins reporting nonzero matchup points. Live score marks update the weekly high/low model odds from actual Sleeper points plus projections for unscored starters in the submitted lineup; they do not reprice the LMSR book or reset existing positions. At Tuesday 1:00 AM ET the lifecycle job fetches finalized Sleeper matchup scores and settles each weekly high/low market in the same run. Exact official ties are voided and refunded. Manual commissioner resolution remains available only for manually originated contracts.
 
 ## Data Model
 

@@ -5,6 +5,11 @@
   "description": "Closed play-money prediction market for a fantasy football league",
   "scripts": {
     "dev": "python3 backend/app.py",
+    "dev:nuxt": "npm run sync:legacy && nuxt dev --host 127.0.0.1 --port 3000",
+    "build:nuxt": "npm run sync:legacy && nuxt build",
+    "generate:nuxt": "npm run sync:legacy && nuxt generate",
+    "preview:nuxt": "nuxt preview --host 127.0.0.1 --port 3000",
+    "sync:legacy": "mkdir -p public/static/vendor && cp frontend/app.js public/static/app.js && cp frontend/vendor/chart.umd.js public/static/vendor/chart.umd.js && cp frontend/vendor/lucide.min.js public/static/vendor/lucide.min.js",
     "vendor:icons": "cp node_modules/lucide/dist/umd/lucide.min.js frontend/vendor/lucide.min.js",
     "test:backend": "PYTHONPYCACHEPREFIX=/private/tmp/league-market-pycache PYTHONPATH=backend python3 -m unittest tests/test_backend.py",
     "test:e2e": "playwright test",
@@ -15,7 +20,10 @@
     "@playwright/test": "^1.56.1"
   },
   "dependencies": {
+    "@iconify-json/lucide": "^1.2.130",
+    "@nuxt/ui": "^4.11.1",
     "chart.js": "^4.5.1",
-    "lucide": "^1.37.0"
+    "lucide": "^1.37.0",
+    "nuxt": "^4.5.2"
   }
 }

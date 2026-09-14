@@ -2,8 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>League Market</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>The League Market</title>
     <script>
       document.documentElement.dataset.theme = localStorage.getItem("leagueMarketTheme") || "dark";
     </script>
@@ -15,7 +15,7 @@
       <section id="join-view" class="join-panel">
         <div>
           <p class="eyebrow">The League 2026</p>
-          <h1>League Market</h1>
+          <h1>The League Market</h1>
           <p class="lede">Trade season-long fantasy outcomes with fake credits, clean rules, and receipts.</p>
         </div>
         <form id="join-form" class="join-form">
@@ -41,12 +41,12 @@
       </section>
 
       <section id="app-view" class="app-frame hidden" aria-busy="false">
-        <aside id="side-panel" class="side-panel" aria-label="League Market navigation">
+        <aside id="side-panel" class="side-panel" aria-label="The League Market navigation">
           <div class="side-brand">
-            <span class="logo-mark">LM</span>
+            <span class="logo-mark" aria-hidden="true"><i data-lucide="chart-candlestick"></i></span>
             <div class="side-copy">
               <p class="eyebrow">Exchange</p>
-              <h1>League Market</h1>
+              <h1>The League Market</h1>
             </div>
           </div>
           <button id="nav-toggle" class="nav-toggle" type="button" aria-label="Collapse navigation" title="Collapse navigation" data-tooltip="Collapse navigation" aria-expanded="true" aria-controls="primary-navigation utility-navigation">
@@ -57,14 +57,10 @@
             <button data-tab="markets" title="Markets" data-tooltip="Markets"><i class="nav-icon" data-lucide="chart-candlestick" aria-hidden="true"></i><span class="nav-label">Markets</span></button>
             <button data-tab="portfolio" title="Portfolio" data-tooltip="Portfolio"><i class="nav-icon" data-lucide="wallet-cards" aria-hidden="true"></i><span class="nav-label">Portfolio</span></button>
             <button data-tab="leaderboard" title="Leaderboard" data-tooltip="Leaderboard"><i class="nav-icon" data-lucide="trophy" aria-hidden="true"></i><span class="nav-label">Leaderboard</span></button>
-            <button data-tab="account" title="Account" data-tooltip="Account"><i class="nav-icon" data-lucide="circle-user-round" aria-hidden="true"></i><span class="nav-label">Account</span></button>
-            <button data-tab="admin" title="Admin" data-tooltip="Admin"><i class="nav-icon" data-lucide="settings-2" aria-hidden="true"></i><span class="nav-label">Admin</span></button>
           </nav>
           <div id="utility-navigation" class="side-controls">
-            <span id="account-name">-</span>
-            <button id="theme-toggle" type="button" title="Toggle theme" data-tooltip="Toggle theme"><i class="nav-icon" data-lucide="sun-moon" aria-hidden="true"></i><span class="nav-label">Theme</span></button>
-            <button id="tour-button" type="button" title="Open walkthrough" data-tooltip="Open walkthrough"><i class="nav-icon" data-lucide="circle-help" aria-hidden="true"></i><span class="nav-label">Walkthrough</span></button>
-            <button id="refresh-button" type="button" title="Refresh data" data-tooltip="Refresh data"><i class="nav-icon" data-lucide="refresh-cw" aria-hidden="true"></i><span class="nav-label">Refresh</span></button>
+            <button data-tab="account" type="button" title="Account" data-tooltip="Account"><i class="nav-icon" data-lucide="circle-user-round" aria-hidden="true"></i><span class="nav-label">Account</span></button>
+            <button data-tab="admin" type="button" title="Admin" data-tooltip="Admin"><i class="nav-icon" data-lucide="settings-2" aria-hidden="true"></i><span class="nav-label">Admin</span></button>
             <button id="logout-button" type="button" title="Log out" data-tooltip="Log out"><i class="nav-icon" data-lucide="log-out" aria-hidden="true"></i><span class="nav-label">Log Out</span></button>
           </div>
         </aside>
@@ -74,6 +70,12 @@
             <div>
               <p class="eyebrow" id="tape-league">THE LEAGUE 2026</p>
               <h1>Market Desk</h1>
+            </div>
+            <div class="topbar-actions" aria-label="Site controls">
+              <button id="feedback-button" class="chrome-button icon-button" type="button" aria-label="Send feedback" title="Send feedback" data-tooltip="Send feedback"><i data-lucide="message-square-plus" aria-hidden="true"></i></button>
+              <button id="tour-button" class="chrome-button icon-button" type="button" aria-label="Open walkthrough" title="Open walkthrough" data-tooltip="Open walkthrough"><i data-lucide="circle-help" aria-hidden="true"></i></button>
+              <button id="refresh-button" class="chrome-button icon-button" type="button" aria-label="Sync market data" title="Sync market data" data-tooltip="Sync market data"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+              <button id="theme-toggle" class="chrome-button icon-button" type="button" aria-label="Switch to light mode" title="Switch to light mode" data-tooltip="Switch to light mode"><i data-lucide="sun-moon" aria-hidden="true"></i></button>
             </div>
           </header>
           <section id="app-status" class="app-status hidden" aria-live="polite"></section>
@@ -106,14 +108,18 @@
             <div class="workspace">
               <section class="market-list">
                 <div class="section-head">
-                  <h2>Markets</h2>
+                  <div>
+                    <span class="desk-eyebrow">The League</span>
+                    <h2>Exchange Desk</h2>
+                  </div>
+                  <div id="market-desk-summary" class="market-desk-summary" aria-label="Exchange desk summary"></div>
                   <div class="market-filter-row">
                     <select id="market-group-filter" aria-label="Market category">
-                      <option value="all">All Markets</option>
-                      <option value="season">Season Long</option>
-                      <option value="weekly">Weekly</option>
-                      <option value="playoffs">Playoffs</option>
-                      <option value="cup">Commissioners Cup</option>
+                      <option value="all">All Desks</option>
+                      <option value="season">Season Futures</option>
+                      <option value="playoffs">Playoff Futures</option>
+                      <option value="weekly">Weekly High / Low</option>
+                      <option value="cup">Cup Brackets</option>
                     </select>
                     <select id="market-filter" aria-label="Market status">
                       <option value="all">All Statuses</option>
@@ -156,7 +162,7 @@
               </div>
               <div class="safety-note">
                 <strong>Play-money exchange</strong>
-                <span>League Market tracks fake credits and commissioner-managed outcomes. It does not move or redeem real dollars.</span>
+                <span>The League Market tracks fake credits and commissioner-managed outcomes. It does not move or redeem real dollars.</span>
               </div>
               <div class="panel-toolbar">
                 <button id="refresh-identity" type="button">Refresh Identity Options</button>
@@ -202,8 +208,8 @@
               <nav class="admin-settings-tabs" aria-label="Admin settings sections">
                 <button type="button" class="active" data-admin-settings-tab="league">League</button>
                 <button type="button" data-admin-settings-tab="people">People</button>
-                <button type="button" data-admin-settings-tab="fund">Fund</button>
                 <button type="button" data-admin-settings-tab="markets">Markets</button>
+                <button type="button" data-admin-settings-tab="feedback">Feedback</button>
                 <button type="button" data-admin-settings-tab="system">System</button>
               </nav>
 
@@ -236,29 +242,6 @@
                 <div id="participants-root" class="participants-root"></div>
               </section>
 
-              <section class="admin-settings-panel hidden" data-admin-settings-panel="fund">
-                <div class="settings-section-head"><div><h3>Fund Configuration</h3><p>Adjust reserves, allocations, and ledger entries.</p></div></div>
-                <div class="fund-settings-grid">
-                  <label>Starting Fund <input id="fund-starting-balance" type="number" step="1" value="599"></label>
-                  <label>Trophies <input id="fund-trophy-reserve" type="number" step="1" value="100"></label>
-                  <label>Commissioners Cup <input id="fund-cup-reserve" type="number" step="1" value="225"></label>
-                  <label>Draft/Event <input id="fund-draft-reserve" type="number" step="1" value="110"></label>
-                  <label>Safety Buffer <input id="fund-safety-buffer" type="number" step="1" value="50"></label>
-                </div>
-                <div class="fund-settings-grid compact">
-                  <label>Core % <input id="fund-core-pct" type="number" step="1" min="0" max="100" value="50"></label>
-                  <label>Team % <input id="fund-team-pct" type="number" step="1" min="0" max="100" value="30"></label>
-                  <label>Weekly % <input id="fund-player-pct" type="number" step="1" min="0" max="100" value="20"></label>
-                </div>
-                <div class="button-row"><button id="save-fund-settings" type="button">Save Settings</button><button id="allocate-sidequest" type="button">Allocate Side Quest</button><button id="sync-sleeper-fees" type="button">Sync Sleeper Fees</button></div>
-                <form id="fund-entry-form" class="fund-entry-form">
-                  <select id="fund-entry-type"><option value="income">Income</option><option value="expense">Expense</option><option value="adjustment">Adjustment</option></select>
-                  <input id="fund-entry-amount" type="number" step="0.01" placeholder="Amount">
-                  <input id="fund-entry-description" placeholder="Description">
-                  <button type="submit">Add Entry</button>
-                </form>
-              </section>
-
               <section class="admin-settings-panel hidden" data-admin-settings-panel="markets">
                 <div class="settings-section-head"><div><h3>Market Tools</h3><p>Create exceptional contracts and check Cup readiness.</p></div></div>
                 <form id="manual-market-form" class="manual-form">
@@ -268,6 +251,34 @@
                   <button type="submit">Create Market</button>
                 </form>
                 <div class="button-row"><button id="seed-cup-markets" type="button">Check Cup Readiness</button></div>
+              </section>
+
+              <section class="admin-settings-panel hidden" data-admin-settings-panel="feedback">
+                <div class="settings-section-head">
+                  <div><h3>Beta Feedback</h3><p>Review tester reports, pricing questions, and settlement notes.</p></div>
+                  <button id="refresh-feedback" type="button">Refresh</button>
+                </div>
+                <div class="feedback-admin-filters">
+                  <select id="feedback-status-filter" aria-label="Feedback status">
+                    <option value="open">Open</option>
+                    <option value="new">New</option>
+                    <option value="reviewing">Reviewing</option>
+                    <option value="resolved">Resolved</option>
+                    <option value="wont_fix">Won't fix</option>
+                    <option value="all">All</option>
+                  </select>
+                  <select id="feedback-category-filter" aria-label="Feedback category">
+                    <option value="all">All Categories</option>
+                    <option value="bug">Bug</option>
+                    <option value="confusing">Confusing</option>
+                    <option value="pricing_odds">Pricing / Odds</option>
+                    <option value="trade_flow">Trade Flow</option>
+                    <option value="settlement">Settlement</option>
+                    <option value="idea">Idea</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div id="feedback-admin-root" class="feedback-admin-root"></div>
               </section>
 
               <section class="admin-settings-panel hidden" data-admin-settings-panel="system">
@@ -307,6 +318,35 @@
       <div class="admin-action-card" tabindex="-1">
         <div class="admin-action-head"><div><span class="eyebrow">Commissioner action</span><h2 id="admin-action-title">Review action</h2></div><button id="admin-action-close" class="icon-button" type="button" aria-label="Close action" title="Close"><i data-lucide="x" aria-hidden="true"></i></button></div>
         <div id="admin-action-content"></div>
+      </div>
+    </section>
+    <section id="feedback-dialog" class="feedback-dialog hidden" aria-modal="true" role="dialog" aria-labelledby="feedback-title">
+      <div class="feedback-card" tabindex="-1">
+        <div class="admin-action-head">
+          <div><span class="eyebrow">Beta feedback</span><h2 id="feedback-title">Send Feedback</h2></div>
+          <button id="feedback-close" class="icon-button" type="button" aria-label="Close feedback" title="Close feedback"><i data-lucide="x" aria-hidden="true"></i></button>
+        </div>
+        <form id="feedback-form" class="feedback-form">
+          <label>Category
+            <select id="feedback-category">
+              <option value="bug">Bug</option>
+              <option value="confusing">Confusing</option>
+              <option value="pricing_odds">Pricing / Odds</option>
+              <option value="trade_flow">Trade Flow</option>
+              <option value="settlement">Settlement</option>
+              <option value="idea">Idea</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label>What happened?
+            <textarea id="feedback-message" rows="5" maxlength="2000" required placeholder="What felt wrong, unclear, or worth improving?"></textarea>
+          </label>
+          <p id="feedback-context" class="feedback-context"></p>
+          <div class="button-row">
+            <button id="feedback-cancel" type="button">Cancel</button>
+            <button id="feedback-submit" class="primary-command inline-command" type="submit"><i class="button-icon" data-lucide="send" aria-hidden="true"></i>Send</button>
+          </div>
+        </form>
       </div>
     </section>
     <section id="order-sheet" class="order-sheet hidden" aria-modal="true" role="dialog" aria-labelledby="order-outcome" aria-describedby="order-status">

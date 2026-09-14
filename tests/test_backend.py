@@ -86,6 +86,35 @@ class EngineTests(unittest.TestCase):
         lineup = optimize_lineup(players, ["QB", "FLEX", "SUPER_FLEX"])
         self.assertEqual({player["player_id"] for player in lineup}, {"qb1", "qb2", "rb1"})
 
+    def test_live_scoring_uses_unscored_starter_projections(self):
+        live = market_app.live_week_score_probabilities(
+            league_id="league",
+            season="2026",
+            week=1,
+            model_run_id=7,
+            estimates={1: (100.0, 1.0), 2: (50.0, 1.0)},
+            player_projections={"a": 100.0, "b": 0.0, "c": 20.0, "d": 30.0},
+            matchups=[
+                {
+                    "roster_id": 1,
+                    "points": 30.0,
+                    "starters": ["a", "b"],
+                    "players_points": {"a": 30.0, "b": 0.0},
+                },
+                {
+                    "roster_id": 2,
+                    "points": 20.0,
+                    "starters": ["c", "d"],
+                    "players_points": {"c": 20.0, "d": 0.0},
+                },
+            ],
+            simulation_count=300,
+        )
+        self.assertEqual(live["projected_remaining"][1], 0.0)
+        self.assertEqual(live["projected_remaining"][2], 30.0)
+        self.assertEqual(live["starter_context"][1]["projection_basis"], "starter_projection")
+        self.assertGreater(live["probabilities"]["week_top"][2], 0.95)
+
 
 class ConfigTests(unittest.TestCase):
     def test_production_rejects_default_or_short_codes(self):
@@ -174,7 +203,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(index.status_code, 200, index.text)
         self.assertEqual(index.headers["cache-control"], "no-store")
         self.assertNotIn("__ASSET_VERSION__", index.text)
-        self.assertRegex(index.text, r"/static/app\.js\?v=[0-9a-f]{12}")
+        if "/_nuxt/" in index.text:
+            self.assertIn("league-market-nuxt-bridge", index.text)
+            self.assertRegex(index.text, r'name="league-market-asset-version" content="[0-9a-f]{12}"')
+        else:
+            self.assertRegex(index.text, r"/static/app\.js\?v=[0-9a-f]{12}")
 
     def seed(self):
         payload, projections = self.modeled_fixture()
@@ -495,6 +528,52 @@ class ApiTests(unittest.TestCase):
         settlement = market_app.weekly_settlement_time(2026, 1)
         self.assertEqual(settlement, datetime(2026, 9, 15, 5, 0, tzinfo=timezone.utc))
 
+    def test_live_score_mark_updates_weekly_model_odds_and_closes_started_week(self):
+        token = self.join()
+        self.seed()
+        headers = {"X-Participant-Token": token}
+        markets = self.client.get("/api/markets", headers=headers).json()["markets"]
+        top = next(market for market in markets if market["title"] == "Week 1 Top Scoring Team")
+        low = next(market for market in markets if market["title"] == "Week 1 Lowest Scoring Team")
+        before_top = next(outcome for outcome in top["outcomes"] if outcome["source_ref"] == "roster:12")
+        before_low = next(outcome for outcome in low["outcomes"] if outcome["source_ref"] == "roster:1")
+        matchups = [
+            {
+                "roster_id": roster_id,
+                "matchup_id": (roster_id + 1) // 2,
+                "points": 150 if roster_id == 12 else roster_id,
+                "starters_points": [25] * 6 if roster_id == 12 else [roster_id / 6] * 6,
+            }
+            for roster_id in range(1, 13)
+        ]
+        result = market_app.run_live_score_mark_operation(
+            "1326428061876371456",
+            matchups_override=matchups,
+            as_of=datetime(2026, 9, 11, 1, 0, tzinfo=timezone.utc),
+            simulation_count=300,
+        )
+        self.assertEqual(result["marked"], 2)
+        self.assertEqual(result["closed"], 2)
+
+        after = self.client.get("/api/markets", headers=headers).json()["markets"]
+        top_after = next(market for market in after if market["id"] == top["id"])
+        low_after = next(market for market in after if market["id"] == low["id"])
+        after_top = next(outcome for outcome in top_after["outcomes"] if outcome["source_ref"] == "roster:12")
+        after_low = next(outcome for outcome in low_after["outcomes"] if outcome["source_ref"] == "roster:1")
+        self.assertEqual(top_after["status"], "closed")
+        self.assertEqual(low_after["status"], "closed")
+        self.assertAlmostEqual(after_top["probability"], before_top["probability"], places=4)
+        self.assertGreater(after_top["model_probability"], 0.95)
+        self.assertGreater(after_top["model_probability"], before_top["model_probability"])
+        self.assertGreater(after_low["model_probability"], 0.95)
+        self.assertGreater(after_low["model_probability"], before_low["model_probability"])
+        self.assertEqual(top_after["model"]["mark_source"], "live_scores")
+        with market_app.db() as conn:
+            event_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM market_events WHERE event_type = 'live_score_mark'"
+            ).fetchone()["count"]
+        self.assertEqual(event_count, 2)
+
     def test_weekly_lifecycle_rehearsal_closes_settles_pays_and_refunds(self):
         self.seed()
         token = self.join("Lifecycle Rehearsal")
@@ -727,6 +806,71 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(overview["data"]["projection_source"], "sleeper")
         self.assertTrue(any(warning["code"] == "backup_stale" for warning in overview["warnings"]))
 
+    def test_feedback_submission_and_admin_triage(self):
+        token = self.join("Beta Tester")
+        self.seed()
+        headers = {"X-Participant-Token": token}
+        market = self.client.get("/api/markets", headers=headers).json()["markets"][0]
+        response = self.client.post(
+            "/api/feedback",
+            headers=headers,
+            json={
+                "category": "pricing_odds",
+                "message": "The implied odds changed and I need a clearer explanation.",
+                "page": "markets",
+                "market_id": market["id"],
+                "context": {"selected_market_id": market["id"], "viewport": {"width": 1200, "height": 800}},
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        feedback = response.json()["feedback"]
+        self.assertEqual(feedback["status"], "new")
+        self.assertEqual(feedback["display_name"], "Beta Tester")
+        self.assertEqual(feedback["market_title"], market["title"])
+
+        inbox = self.client.get(
+            "/api/admin/feedback?league_id=1326428061876371456&status=open",
+            headers=self.admin_headers(),
+        )
+        self.assertEqual(inbox.status_code, 200, inbox.text)
+        self.assertEqual(inbox.json()["feedback"][0]["id"], feedback["id"])
+        dashboard = self.client.get(
+            "/api/admin/dashboard?league_id=1326428061876371456",
+            headers=self.admin_headers(),
+        ).json()
+        self.assertTrue(any(action["type"] == "feedback_review" for action in dashboard["actions"]))
+
+        updated = self.client.post(
+            f"/api/admin/feedback/{feedback['id']}/status",
+            headers=self.admin_headers(),
+            json={"status": "resolved", "note": "Handled in beta notes"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["feedback"]["status"], "resolved")
+        dashboard = self.client.get(
+            "/api/admin/dashboard?league_id=1326428061876371456",
+            headers=self.admin_headers(),
+        ).json()
+        self.assertFalse(any(action["type"] == "feedback_review" for action in dashboard["actions"]))
+
+    def test_realtime_revision_changes_after_trade(self):
+        token = self.join("Live Trader")
+        self.seed()
+        headers = {"X-Participant-Token": token}
+        market = self.client.get("/api/markets", headers=headers).json()["markets"][0]
+        outcome_id = market["outcomes"][0]["id"]
+        with market_app.db() as conn:
+            before = market_app.realtime_revision(conn, "1326428061876371456")
+
+        trade = self.trade(headers, market["id"], outcome_id, 2, "buy")
+        self.assertEqual(trade.status_code, 200, trade.text)
+
+        with market_app.db() as conn:
+            after = market_app.realtime_revision(conn, "1326428061876371456")
+        self.assertNotEqual(before["signature"], after["signature"])
+        self.assertGreater(after["trade_id"], before["trade_id"])
+        self.assertGreater(after["market_event_id"], before["market_event_id"])
+
     def test_admin_session_cookie_expiry_logout_and_origin_protection(self):
         token = self.join("Commissioner Session")
         invalid = self.client.post(
@@ -805,7 +949,7 @@ class ApiTests(unittest.TestCase):
     def test_scheduled_endpoint_runs_lifecycle_and_skips_fresh_daily_jobs(self):
         self.seed()
         with market_app.db() as conn:
-            for job_type in ("pipeline", "backup", "prune"):
+            for job_type in ("live_scores", "pipeline", "backup", "prune"):
                 conn.execute(
                     """
                     INSERT INTO job_runs
@@ -818,7 +962,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
         self.assertEqual(result["completed"], ["lifecycle"])
-        self.assertEqual(set(result["skipped"]), {"pipeline", "backup", "prune"})
+        self.assertEqual(set(result["skipped"]), {"live_scores", "pipeline", "backup", "prune"})
         with market_app.db() as conn:
             lifecycle = conn.execute(
                 "SELECT * FROM job_runs WHERE job_type = 'lifecycle' ORDER BY id DESC LIMIT 1"
@@ -826,8 +970,54 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(lifecycle["status"], "succeeded")
         self.assertEqual(lifecycle["triggered_by"], "scheduler")
 
+    def test_scheduled_endpoint_runs_live_score_marks_when_due(self):
+        self.seed()
+        with market_app.db() as conn:
+            for job_type in ("pipeline", "backup", "prune"):
+                conn.execute(
+                    """
+                    INSERT INTO job_runs
+                      (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                    VALUES (?, ?, 'succeeded', 'scheduler', ?, ?, '{}')
+                    """,
+                    ("1326428061876371456", job_type, market_app.now_iso(), market_app.now_iso()),
+                )
+        original_matchups = market_app.SleeperAdapter.get_matchups
+        market_app.SleeperAdapter.get_matchups = staticmethod(lambda league_id, week: [
+            {
+                "roster_id": roster_id,
+                "matchup_id": (roster_id + 1) // 2,
+                "points": 150 if roster_id == 12 else roster_id,
+                "starters_points": [25] * 6 if roster_id == 12 else [roster_id / 6] * 6,
+            }
+            for roster_id in range(1, 13)
+        ])
+        try:
+            response = self.client.post("/api/admin/scheduled/run", headers=self.admin_headers())
+        finally:
+            market_app.SleeperAdapter.get_matchups = original_matchups
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertIn("live_scores", result["completed"])
+        self.assertEqual(set(result["skipped"]), {"pipeline", "backup", "prune"})
+        with market_app.db() as conn:
+            live_scores = conn.execute(
+                "SELECT * FROM job_runs WHERE job_type = 'live_scores' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(live_scores["status"], "succeeded")
+        self.assertEqual(live_scores["triggered_by"], "scheduler")
+
     def test_scheduled_endpoint_records_pipeline_failure_and_completes_maintenance(self):
         self.seed()
+        with market_app.db() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_runs
+                  (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                VALUES (?, 'live_scores', 'succeeded', 'scheduler', ?, ?, '{}')
+                """,
+                ("1326428061876371456", market_app.now_iso(), market_app.now_iso()),
+            )
         original_pipeline = market_app.execute_live_pipeline
         market_app.execute_live_pipeline = lambda league_id: (_ for _ in ()).throw(RuntimeError("Sleeper unavailable"))
         try:
@@ -974,9 +1164,12 @@ class ApiTests(unittest.TestCase):
         payload = json.loads(fixture.read_text(encoding="utf-8"))
         with market_app.db() as conn:
             result = market_app.sync_snapshot(conn, payload, "1326428061876371456")
+            meta = market_app.active_league_meta(conn, "1326428061876371456")
         self.assertEqual(result["teams"], 12)
         self.assertGreater(result["players"], 50)
         self.assertGreater(len(result["managers"]), 0)
+        self.assertEqual(meta["roster_count"], 12)
+        self.assertEqual(meta["manager_count"], 12)
         managers = self.client.get(
             "/api/admin/managers?league_id=1326428061876371456",
             headers=self.admin_headers(),

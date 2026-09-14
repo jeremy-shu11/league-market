@@ -1,7 +1,12 @@
 .env
 node_modules/
+.nuxt/
+.output/
+dist
+public/static/
 playwright-report/
 test-results/
+output/
 data/*.sqlite-shm
 data/*.sqlite-wal
 data/*.sqlite
@@ -9,3 +14,5 @@ data/raw/
 data/backups/
 __pycache__/
 *.pyc
+.vercel
+.env*

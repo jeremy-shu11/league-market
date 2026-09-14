@@ -16,6 +16,9 @@ const state = {
   participants: [],
   invites: [],
   resolutionMarkets: [],
+  feedback: null,
+  feedbackStatusFilter: "open",
+  feedbackCategoryFilter: "all",
   adminOverview: null,
   adminSession: null,
   adminDashboard: null,
@@ -36,6 +39,10 @@ const state = {
   },
   mobileNavOpen: false,
   isRefreshing: false,
+  realtimeSource: null,
+  realtimeSignature: "",
+  realtimePending: false,
+  realtimeReconnectTimer: null,
   detailLoadingId: null,
   detailErrors: {},
   lastFocusedElement: null,
@@ -111,6 +118,10 @@ const allocationPct = (value, total) => {
   if (percent > 0 && percent < 1) return "<1%";
   return `${Math.round(percent)}%`;
 };
+const ratioWidth = (value, total) => {
+  const percent = (Number(value || 0) / Math.max(1, Number(total || 0))) * 100;
+  return `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+};
 const initials = (value) => String(value || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 const ledgerLabels = {
   buy: "Bought shares",
@@ -167,8 +178,13 @@ function fundSourceLabel(value) {
 
 function applyTheme() {
   document.documentElement.dataset.theme = state.theme;
-  const toggle = $("#theme-toggle .nav-label");
-  if (toggle) toggle.textContent = state.theme === "dark" ? "Light Mode" : "Dark Mode";
+  const toggle = $("#theme-toggle");
+  const label = state.theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+  if (toggle) {
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("title", label);
+    toggle.dataset.tooltip = label;
+  }
 }
 
 function isMobileNavigation() {
@@ -177,6 +193,29 @@ function isMobileNavigation() {
 
 function setButtonBusy(button, busy, label) {
   if (!button) return;
+  if (button.classList.contains("icon-button")) {
+    if (busy) {
+      button.dataset.idleLabel = button.getAttribute("aria-label") || "";
+      button.dataset.idleTitle = button.getAttribute("title") || "";
+      button.dataset.idleTooltip = button.dataset.tooltip || "";
+      const busyLabel = label || "Working";
+      button.setAttribute("aria-label", busyLabel);
+      button.setAttribute("title", busyLabel);
+      button.dataset.tooltip = busyLabel;
+      button.classList.add("is-busy");
+    } else {
+      if (button.dataset.idleLabel) button.setAttribute("aria-label", button.dataset.idleLabel);
+      if (button.dataset.idleTitle) button.setAttribute("title", button.dataset.idleTitle);
+      if (button.dataset.idleTooltip) button.dataset.tooltip = button.dataset.idleTooltip;
+      delete button.dataset.idleLabel;
+      delete button.dataset.idleTitle;
+      delete button.dataset.idleTooltip;
+      button.classList.remove("is-busy");
+    }
+    button.disabled = busy;
+    button.setAttribute("aria-busy", String(busy));
+    return;
+  }
   if (busy) {
     button.dataset.idleHtml = button.innerHTML;
     button.textContent = label || "Working...";
@@ -257,6 +296,7 @@ async function join(event) {
 
 async function boot() {
   if (!state.token) {
+    stopRealtime();
     $("#join-view").classList.remove("hidden");
     $("#app-view").classList.add("hidden");
     return;
@@ -266,11 +306,13 @@ async function boot() {
     await refreshAll({ announce: true });
     $("#join-view").classList.add("hidden");
     $("#app-view").classList.remove("hidden");
+    startRealtime();
     if (!localStorage.getItem("leagueMarketTourSeen")) showTour(0);
   } catch (error) {
     if (error.status === 401) {
       localStorage.removeItem("leagueMarketToken");
       state.token = "";
+      stopRealtime();
       $("#join-view").classList.remove("hidden");
       $("#app-view").classList.add("hidden");
       $("#join-error").textContent = "Your session expired. Enter the league again.";
@@ -318,7 +360,79 @@ async function refreshAll({ announce = false } = {}) {
   }
 }
 
+function stopRealtime() {
+  if (state.realtimeSource) {
+    state.realtimeSource.close();
+    state.realtimeSource = null;
+  }
+  if (state.realtimeReconnectTimer) {
+    window.clearTimeout(state.realtimeReconnectTimer);
+    state.realtimeReconnectTimer = null;
+  }
+  state.realtimeSignature = "";
+  state.realtimePending = false;
+}
+
+function scheduleRealtimeRefresh() {
+  if (state.realtimePending || state.isRefreshing) return;
+  state.realtimePending = true;
+  window.setTimeout(async () => {
+    state.realtimePending = false;
+    try {
+      await refreshAll();
+      if (state.selectedMarketId) await loadMarketDetail(state.selectedMarketId);
+      if (state.activeTab === "admin" && state.adminSession?.authenticated) {
+        await loadAdminDashboard().catch(() => {});
+      }
+    } catch (error) {
+      setAppStatus("error", `Live update failed: ${error.message}`);
+    }
+  }, 350);
+}
+
+function startRealtime() {
+  stopRealtime();
+  if (!state.token || !window.EventSource) return;
+  const source = new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);
+  state.realtimeSource = source;
+  source.addEventListener("market_update", (event) => {
+    let payload = {};
+    try {
+      payload = JSON.parse(event.data || "{}");
+    } catch (_) {
+      payload = {};
+    }
+    if (!payload.signature) return;
+    if (!state.realtimeSignature) {
+      state.realtimeSignature = payload.signature;
+      return;
+    }
+    if (payload.signature !== state.realtimeSignature) {
+      state.realtimeSignature = payload.signature;
+      scheduleRealtimeRefresh();
+    }
+  });
+  source.addEventListener("stream_error", () => {
+    source.close();
+  });
+  source.onerror = () => {
+    if (state.realtimeSource !== source) return;
+    state.realtimeSource = null;
+    source.close();
+    if (!state.token || state.realtimeReconnectTimer) return;
+    state.realtimeReconnectTimer = window.setTimeout(() => {
+      state.realtimeReconnectTimer = null;
+      startRealtime();
+    }, 3000);
+  };
+}
+
 function notify(message, tone = "info") {
+  try {
+    if (window.__leagueMarketToast?.(message, tone)) return;
+  } catch (_) {
+    // Fall back to the in-page live region when the Nuxt UI bridge is unavailable.
+  }
   const notice = { id: Date.now() + Math.random(), message, tone };
   state.notices.unshift(notice);
   state.notices = state.notices.slice(0, 4);
@@ -350,7 +464,8 @@ function exposureTone(value, total) {
 function openDialog(dialog, focusSelector) {
   if (!dialog) return;
   state.lastFocusedElement = document.activeElement;
-  document.querySelector(".app-shell").inert = true;
+  $("#join-view").inert = true;
+  $("#app-view").inert = true;
   dialog.classList.remove("hidden");
   window.requestAnimationFrame(() => {
     (dialog.querySelector(focusSelector) || dialog.querySelector("[tabindex='-1']") || dialog).focus();
@@ -360,7 +475,8 @@ function openDialog(dialog, focusSelector) {
 function closeDialog(dialog) {
   if (!dialog) return;
   dialog.classList.add("hidden");
-  document.querySelector(".app-shell").inert = false;
+  $("#join-view").inert = false;
+  $("#app-view").inert = false;
   if (state.lastFocusedElement?.isConnected) state.lastFocusedElement.focus();
   state.lastFocusedElement = null;
 }
@@ -415,7 +531,7 @@ function render() {
   $("#app-view").classList.toggle("nav-collapsed", state.navCollapsed);
   $("#app-view").classList.toggle("mobile-nav-open", state.mobileNavOpen);
   $("#app-view").classList.toggle("dashboard-active", state.activeTab === "home");
-  document.querySelectorAll(".tabs button").forEach((item) => {
+  document.querySelectorAll("[data-tab]").forEach((item) => {
     const active = item.dataset.tab === state.activeTab;
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
@@ -426,7 +542,12 @@ function render() {
   $("#nav-toggle").setAttribute("aria-label", mobileNavigation
     ? `${state.mobileNavOpen ? "Close" : "Open"} navigation menu`
     : `${state.navCollapsed ? "Expand" : "Collapse"} navigation`);
-  $("#account-name").textContent = state.session?.participant?.display_name || "-";
+  const accountButton = $("[data-tab='account']");
+  const accountName = state.session?.participant?.display_name || "Account";
+  if (accountButton) {
+    accountButton.setAttribute("title", accountName);
+    accountButton.dataset.tooltip = accountName;
+  }
   const league = state.session?.league || {};
   $("#tape-league").textContent = `${league.name || "THE LEAGUE"} ${league.season || "2026"}`.toUpperCase();
   if ($("#league-id-input") && !$("#league-id-input").dataset.touched) {
@@ -555,6 +676,166 @@ function adminTime(value) {
   return formatAdminAge(Math.max(0, elapsed / 3600000));
 }
 
+const feedbackCategoryLabels = {
+  bug: "Bug",
+  confusing: "Confusing",
+  pricing_odds: "Pricing / Odds",
+  trade_flow: "Trade Flow",
+  settlement: "Settlement",
+  idea: "Idea",
+  other: "Other"
+};
+
+const feedbackStatusLabels = {
+  new: "New",
+  reviewing: "Reviewing",
+  resolved: "Resolved",
+  wont_fix: "Won't fix"
+};
+
+function feedbackContextSnapshot() {
+  const market = state.activeTab === "markets" ? selectedMarket() : null;
+  return {
+    page: state.activeTab,
+    market_id: market?.id || null,
+    market_title: market?.title || "",
+    context: {
+      path: window.location.pathname + window.location.search + window.location.hash,
+      selected_market_id: market?.id || null,
+      selected_market_title: market?.title || "",
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      nav_collapsed: state.navCollapsed,
+      active_tab: state.activeTab
+    }
+  };
+}
+
+function feedbackContextLabel(snapshot = feedbackContextSnapshot()) {
+  if (snapshot.market_title) return `Attaching context: ${snapshot.page} / ${snapshot.market_title}`;
+  return `Attaching context: ${snapshot.page}`;
+}
+
+function openFeedbackDialog() {
+  const dialog = $("#feedback-dialog");
+  if (!dialog) return;
+  $("#feedback-message").value = "";
+  $("#feedback-category").value = "confusing";
+  $("#feedback-context").textContent = feedbackContextLabel();
+  openDialog(dialog, "#feedback-message");
+  hydrateIcons();
+}
+
+function closeFeedbackDialog() {
+  const dialog = $("#feedback-dialog");
+  if (!dialog) return;
+  closeDialog(dialog);
+}
+
+async function submitFeedback(event) {
+  event.preventDefault();
+  const message = $("#feedback-message").value.trim();
+  if (message.length < 3) {
+    notify("Add a little more detail before sending", "warn");
+    $("#feedback-message").focus();
+    return;
+  }
+  const snapshot = feedbackContextSnapshot();
+  try {
+    await withAdminButton($("#feedback-submit"), "Sending...", async () => {
+      await api("/api/feedback", {
+        method: "POST",
+        body: JSON.stringify({
+          category: $("#feedback-category").value,
+          message,
+          page: snapshot.page,
+          market_id: snapshot.market_id,
+          market_title: snapshot.market_title,
+          context: snapshot.context
+        })
+      });
+    });
+    closeFeedbackDialog();
+    notify("Feedback sent", "success");
+  } catch (error) {
+    notify(error.message, "warn");
+  }
+}
+
+async function loadFeedback() {
+  const root = $("#feedback-admin-root");
+  root?.setAttribute("aria-busy", "true");
+  try {
+    const params = new URLSearchParams({
+      league_id: currentAdminLeagueId(),
+      status: state.feedbackStatusFilter,
+      category: state.feedbackCategoryFilter
+    });
+    state.feedback = await api(`/api/admin/feedback?${params.toString()}`, { headers: adminHeaders() });
+    renderAdminFeedback();
+    return state.feedback;
+  } finally {
+    root?.setAttribute("aria-busy", "false");
+  }
+}
+
+function renderAdminFeedback() {
+  const root = $("#feedback-admin-root");
+  if (!root) return;
+  const statusFilter = $("#feedback-status-filter");
+  const categoryFilter = $("#feedback-category-filter");
+  if (statusFilter) statusFilter.value = state.feedbackStatusFilter;
+  if (categoryFilter) categoryFilter.value = state.feedbackCategoryFilter;
+  const feedback = state.feedback;
+  if (!feedback) {
+    root.innerHTML = loadingState("Loading beta feedback");
+    return;
+  }
+  const items = feedback.feedback || [];
+  if (!items.length) {
+    root.innerHTML = emptyState("No feedback in this view", "Change filters or wait for testers to send notes.");
+    return;
+  }
+  root.innerHTML = `
+    <div class="feedback-admin-list">
+      ${items.map((item) => `
+        <article class="feedback-admin-item">
+          <div>
+            <header>
+              <span class="feedback-status-pill">${escapeHtml(feedbackStatusLabels[item.status] || item.status)}</span>
+              <span>${escapeHtml(feedbackCategoryLabels[item.category] || item.category)}</span>
+              <span>${escapeHtml(adminTime(item.created_at))}</span>
+            </header>
+            <p>${escapeHtml(item.message)}</p>
+            <div class="feedback-admin-meta">
+              ${escapeHtml(item.display_name)}${item.market_title ? ` · ${escapeHtml(item.market_title)}` : ""}${item.page ? ` · ${escapeHtml(item.page)}` : ""}
+            </div>
+          </div>
+          <select class="feedback-admin-status" data-feedback-status-id="${item.id}" aria-label="Update feedback status">
+            ${Object.entries(feedbackStatusLabels).map(([value, label]) => `<option value="${value}" ${item.status === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+          </select>
+        </article>
+      `).join("")}
+    </div>
+  `;
+  root.querySelectorAll("[data-feedback-status-id]").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const id = Number(select.dataset.feedbackStatusId);
+      try {
+        await api(`/api/admin/feedback/${id}/status`, {
+          method: "POST",
+          headers: adminHeaders(),
+          body: JSON.stringify({ status: select.value, note: "" })
+        });
+        notify("Feedback status updated", "success");
+        await Promise.all([loadFeedback(), loadAdminDashboard()]);
+      } catch (error) {
+        notify(error.message, "warn");
+        renderAdminFeedback();
+      }
+    });
+  });
+}
+
 function renderAdminShell() {
   const locked = !state.adminSession?.authenticated;
   $("#admin-lock-view")?.classList.toggle("hidden", !locked);
@@ -595,7 +876,7 @@ function renderAdminDashboard() {
       `).join("")}
     </div>
   `;
-  const automation = ["pipeline", "lifecycle", "backup"].map((key) => dashboard.automation?.[key]).filter(Boolean);
+  const automation = ["pipeline", "live_scores", "lifecycle", "backup"].map((key) => dashboard.automation?.[key]).filter(Boolean);
   automationRoot.innerHTML = `
     <span>Automation</span>
     ${automation.map((job) => `<span class="automation-state ${escapeHtml(job.state)}"><i aria-hidden="true"></i>${escapeHtml(job.label)} · ${escapeHtml(adminTime(job.last_success_at))}</span>`).join("")}
@@ -617,6 +898,7 @@ function renderAdminSettings() {
     panel.classList.toggle("hidden", panel.dataset.adminSettingsPanel !== state.adminSettingsTab);
   });
   $("#admin-demo-controls")?.classList.toggle("hidden", state.adminDashboard?.environment === "production");
+  if (state.adminSettingsTab === "feedback") renderAdminFeedback();
   renderAdminHistory();
 }
 
@@ -721,6 +1003,7 @@ function closeAdminActionDialog() {
 async function retryAdminJob(jobType, button) {
   const targets = {
     pipeline: ["/api/admin/pipeline", { league_id: currentAdminLeagueId() }],
+    live_scores: ["/api/admin/live-scores/run", { league_id: currentAdminLeagueId() }],
     lifecycle: ["/api/admin/lifecycle/run", {}],
     backup: ["/api/admin/maintenance/backup", {}]
   };
@@ -753,6 +1036,13 @@ function handleAdminInboxAction(action, button) {
     state.adminSettingsTab = action.payload.settings_tab || "system";
     state.adminView = "settings";
     renderAdminShell();
+    return;
+  }
+  if (action.type === "feedback_review") {
+    state.adminSettingsTab = action.payload.settings_tab || "feedback";
+    state.adminView = "settings";
+    renderAdminShell();
+    loadFeedback().catch((error) => notify(error.message, "warn"));
     return;
   }
   if (action.type === "market_resolution") {
@@ -847,8 +1137,8 @@ function marketGroup(market) {
   const title = String(market.title || "");
   if (title.includes("Commissioners Cup")) return "Cup";
   if (title.includes("Week ")) return "Weekly";
-  if (title.includes("Makes Playoffs")) return "Team";
-  return "Season";
+  if (title.includes("Makes Playoffs")) return "Playoff";
+  return "Season Future";
 }
 
 function marketCategory(market) {
@@ -866,22 +1156,22 @@ function marketWeek(market) {
 
 function marketCategoryLabel(category) {
   return {
-    season: "Season Long",
+    season: "Season Futures",
     playoffs: "Playoff Futures",
-    weekly: "Weekly Markets",
-    cup: "Commissioners Cup"
+    weekly: "Weekly High / Low",
+    cup: "Cup Brackets"
   }[category] || "Markets";
 }
 
 function marketCategoryDescription(category, markets = []) {
   if (category === "weekly") {
     const weeks = [...new Set(markets.map(marketWeek).filter(Boolean))].sort((a, b) => a - b);
-    return weeks.length ? `Weeks ${weeks[0]}-${weeks[weeks.length - 1]}` : "Weekly high and low score contracts";
+    return weeks.length ? `Weeks ${weeks[0]}-${weeks[weeks.length - 1]} · Sleeper final scores` : "Top and lowest score by official Sleeper week";
   }
   return {
-    season: "Championship futures",
-    playoffs: "One contract per team",
-    cup: "Gold, Silver, and Bronze bracket futures"
+    season: "Champion and season-long roster outcomes",
+    playoffs: "One YES/NO contract per roster",
+    cup: "Commissioner bracket futures"
   }[category] || "";
 }
 
@@ -898,10 +1188,59 @@ function sortMarketsForCategory(markets) {
   });
 }
 
+function renderMarketDeskSummary(markets, visibleMarkets) {
+  const root = $("#market-desk-summary");
+  if (!root) return;
+  const visibleOpen = visibleMarkets.filter((market) => market.status === "open").length;
+  const visibleContracts = visibleMarkets.reduce((sum, market) => sum + Number(market.outcomes?.length || 0), 0);
+  const visibleVolume = visibleMarkets.reduce((sum, market) => sum + Number(market.metrics?.volume || 0), 0);
+  const visibleFlow = visibleMarkets.reduce((sum, market) => sum + Number(market.metrics?.net_flow_24h || 0), 0);
+  root.innerHTML = `
+    <article>
+      <span>Open</span>
+      <strong>${fmt(visibleOpen)}</strong>
+    </article>
+    <article>
+      <span>Contracts</span>
+      <strong>${fmt(visibleContracts)}</strong>
+    </article>
+    <article>
+      <span>Volume</span>
+      <strong>${money(visibleVolume)}</strong>
+    </article>
+    <article>
+      <span>24h Flow</span>
+      <strong class="${visibleFlow >= 0 ? "good" : "bad"}">${visibleFlow >= 0 ? "+" : ""}${fmt(visibleFlow)} sh</strong>
+    </article>
+  `;
+}
+
 function marketMove(market) {
   const top = [...(market.outcomes || [])].sort((a, b) => Number(b.price) - Number(a.price))[0];
   const baseline = Number(top?.prior_probability || (1 / Math.max(1, market.outcomes?.length || 1))) * 100;
   return Number(top?.price || 0) - baseline;
+}
+
+function isPlayoffMarket(market) {
+  return marketCategory(market) === "playoffs" && String(market.title || "").includes("Makes Playoffs");
+}
+
+function playoffTeamName(market) {
+  return String(market.title || "").replace(/\s+Makes Playoffs\s*$/i, "").trim() || market.title || "Team";
+}
+
+function binarySideOutcomes(market) {
+  const outcomes = market.outcomes || [];
+  const bySide = (side) => outcomes.find((outcome) => {
+    const label = String(outcome.label || "").trim().toLowerCase();
+    const source = String(outcome.source_ref || "").trim().toLowerCase();
+    return label === side || source.endsWith(`:${side}`);
+  });
+  return { yes: bySide("yes"), no: bySide("no") };
+}
+
+function playoffQuoteMove(outcome) {
+  return Number(outcome?.price || 0) - Number(outcome?.prior_probability || 0) * 100;
 }
 
 function lmsrLogSumExp(values) {
@@ -1096,13 +1435,14 @@ function renderHome() {
 }
 
 function renderAssetRow(market) {
+  if (isPlayoffMarket(market)) return renderPlayoffAssetRow(market);
   const top = [...(market.outcomes || [])].sort((a, b) => Number(b.price) - Number(a.price))[0];
   const move = marketMove(market);
   const topProbability = Number(top?.probability || 0);
   const moveTone = move >= 0 ? "good" : "bad";
   return `
     <button class="asset-row market-quote ${Number(market.id) === Number(state.selectedMarketId) ? "active" : ""}" type="button" data-market-id="${market.id}">
-      <span class="quote-avatar">${outcomeAvatar(top || market.outcomes?.[0] || {})}</span>
+      <span class="quote-avatar">${marketQuoteAvatar(market, top || market.outcomes?.[0] || {})}</span>
       <span class="quote-copy">
         <span class="quote-kicker">${marketGroup(market)} · ${escapeHtml(market.status)}</span>
         <strong>${escapeHtml(market.title)}</strong>
@@ -1117,10 +1457,40 @@ function renderAssetRow(market) {
   `;
 }
 
+function renderPlayoffAssetRow(market) {
+  const { yes, no } = binarySideOutcomes(market);
+  const yesProbability = Number(yes?.probability || 0);
+  const yesPrice = Number(yes?.price || 0);
+  const noPrice = Number(no?.price || 0);
+  const favoredSide = yesProbability >= 0.5 ? "YES" : "NO";
+  const move = playoffQuoteMove(yes);
+  const moveTone = move >= 0 ? "good" : "bad";
+  const teamName = playoffTeamName(market);
+  return `
+    <button class="asset-row market-quote playoff-quote ${Number(market.id) === Number(state.selectedMarketId) ? "active" : ""}" type="button" data-market-id="${market.id}">
+      ${teamAvatar(teamName)}
+      <span class="quote-copy">
+        <span class="quote-kicker">Playoff odds · ${escapeHtml(market.status)}</span>
+        <strong>${escapeHtml(teamName)}</strong>
+        <small><b>${pct(yesProbability)}</b> to make playoffs <span class="side-chip ${favoredSide === "YES" ? "yes" : "no"}">${favoredSide} favored</span></small>
+        <span class="playoff-odds-rail" aria-hidden="true">
+          <i class="yes" style="width: ${probabilityWidth(yesProbability)}"></i>
+          <i class="split" style="left: 50%"></i>
+        </span>
+      </span>
+      <b class="quote-price playoff-price">
+        ${money(yesPrice)}
+        <small class="${moveTone}">${move >= 0 ? "+" : ""}${money(move)} YES</small>
+        ${no ? `<em>NO ${money(noPrice)}</em>` : ""}
+      </b>
+    </button>
+  `;
+}
+
 function activateTab(tab) {
   state.activeTab = tab;
   $("#app-view").classList.toggle("dashboard-active", tab === "home");
-  document.querySelectorAll(".tabs button").forEach((item) => {
+  document.querySelectorAll("[data-tab]").forEach((item) => {
     const active = item.dataset.tab === tab;
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
@@ -1206,6 +1576,7 @@ function renderMarkets() {
     const categoryMatch = categoryFilter === "all" || marketCategory(market) === categoryFilter;
     return statusMatch && categoryMatch;
   }));
+  renderMarketDeskSummary(state.markets, markets);
   const categoryOrder = ["season", "playoffs", "weekly", "cup"];
   const grouped = categoryOrder
     .map((category) => [category, markets.filter((market) => marketCategory(market) === category)])
@@ -1227,6 +1598,8 @@ function renderMarkets() {
 }
 
 function renderMarketSection(category, markets) {
+  const openCount = markets.filter((market) => market.status === "open").length;
+  const volume = markets.reduce((sum, market) => sum + Number(market.metrics?.volume || 0), 0);
   return `
     <section class="market-section" data-market-section="${category}">
       <div class="market-section-head">
@@ -1234,7 +1607,7 @@ function renderMarketSection(category, markets) {
           <h3>${escapeHtml(marketCategoryLabel(category))}</h3>
           <span>${escapeHtml(marketCategoryDescription(category, markets))}</span>
         </div>
-        <b>${markets.length}</b>
+        <b><span>${openCount} open</span><small>${money(volume)} vol</small></b>
       </div>
       <div class="market-section-list">
         ${markets.map(renderAssetRow).join("")}
@@ -1245,22 +1618,25 @@ function renderMarketSection(category, markets) {
 
 function renderWeeklyMarketGroup(markets) {
   const weeks = [...new Set(markets.map(marketWeek).filter(Boolean))].sort((a, b) => a - b);
+  const openCount = markets.filter((market) => market.status === "open").length;
+  const volume = markets.reduce((sum, market) => sum + Number(market.metrics?.volume || 0), 0);
   return `
     <section class="market-section weekly-market-section" data-market-section="weekly">
       <div class="market-section-head">
         <div>
-          <h3>Weekly Markets</h3>
+          <h3>Weekly High / Low</h3>
           <span>Top and lowest scoring team by week</span>
         </div>
-        <b>${markets.length}</b>
+        <b><span>${openCount} open</span><small>${money(volume)} vol</small></b>
       </div>
       ${weeks.map((week) => {
         const weekMarkets = markets.filter((market) => marketWeek(market) === week);
+        const weekOpen = weekMarkets.filter((market) => market.status === "open").length;
         return `
           <div class="week-market-group">
             <div class="week-market-head">
               <h4>Week ${week}</h4>
-              <span>${weekMarkets.length} markets</span>
+              <span>${weekOpen} open · ${weekMarkets.length} listed</span>
             </div>
             <div class="market-section-list">
               ${weekMarkets.map(renderAssetRow).join("")}
@@ -1286,9 +1662,24 @@ function outcomeTokenKind(outcome) {
   const source = String(outcome?.source_ref || "").toLowerCase();
   if (label === "yes" || source.endsWith(":yes")) return "yes";
   if (label === "no" || source.endsWith(":no")) return "no";
-  if (imageForOutcome(outcome)) return "player";
   if (source.startsWith("roster:")) return "team";
+  if (imageForOutcome(outcome)) return "player";
   return "generic";
+}
+
+function isChampionMarket(market) {
+  const title = String(market?.title || "").toLowerCase();
+  const key = String(market?.contract_key || "").toLowerCase();
+  return title.includes("league champion") || key.endsWith(":champion");
+}
+
+function marketQuoteAvatar(market, outcome) {
+  if (!isChampionMarket(market)) return outcomeAvatar(outcome);
+  return '<span class="player-avatar market-icon-avatar champion" aria-hidden="true"><i data-lucide="trophy"></i></span>';
+}
+
+function teamAvatar(label) {
+  return `<span class="player-avatar team team-market-avatar" aria-hidden="true"><span class="avatar-fallback">${escapeHtml(initials(label))}</span></span>`;
 }
 
 function renderLeaguePreview(payload) {
@@ -1679,11 +2070,11 @@ function outcomeAvatar(outcome) {
   const image = imageForOutcome(outcome);
   const kind = outcomeTokenKind(outcome);
   if (kind === "yes" || kind === "no") {
-    return `<span class="outcome-token ${kind}" aria-label="${kind === "yes" ? "Yes outcome" : "No outcome"}"><span>${kind === "yes" ? "Yes" : "No"}</span></span>`;
+    return `<span class="outcome-token ${kind}" aria-hidden="true"><span>${kind === "yes" ? "Yes" : "No"}</span></span>`;
   }
   const fallback = `<span class="avatar-fallback">${escapeHtml(initials(outcome?.label))}</span>`;
-  if (!image) return `<span class="player-avatar ${kind}">${fallback}</span>`;
-  return `<span class="player-avatar ${kind} has-image">${fallback}<img src="${image}" alt="" loading="lazy" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.remove('has-image'); this.remove()"></span>`;
+  if (!image) return `<span class="player-avatar ${kind}" aria-hidden="true">${fallback}</span>`;
+  return `<span class="player-avatar ${kind} has-image" aria-hidden="true">${fallback}<img src="${image}" alt="" loading="lazy" onload="this.parentElement.classList.add('loaded')" onerror="this.parentElement.classList.remove('has-image'); this.remove()"></span>`;
 }
 
 function selectedMarket() {
@@ -1707,23 +2098,38 @@ async function loadMarketDetail(marketId = state.selectedMarketId) {
   }
 }
 
-function renderMarketPriceChart(points) {
+function renderMarketPriceChart(points, market = {}) {
   const canvas = $("#market-price-chart");
   if (!canvas || !window.Chart) return;
   if (state.marketChart) state.marketChart.destroy();
   const styles = getComputedStyle(document.documentElement);
   const muted = styles.getPropertyValue("--muted").trim() || "#8d98a8";
   const grid = styles.getPropertyValue("--gridline-strong").trim() || "rgba(148,163,184,.13)";
+  const payout = Math.max(1, Number(market.payout || 100));
   const colors = ["#4fb286", "#58a6ff", "#d6a84b", "#d06b72", "#9c8cc2", "#82b3a3"];
+  const snapshotTime = market.updated_at || market.close_time || new Date().toISOString();
+  const historyPoints = Array.isArray(points) ? points : [];
+  const sourcePoints = historyPoints.length ? historyPoints : (market.outcomes || []).map((outcome) => ({
+    outcome_id: outcome.id,
+    outcome_label: outcome.label,
+    price_after: Number(outcome.price || Number(outcome.probability || 0) * payout),
+    created_at: snapshotTime
+  }));
+  const pointPrice = (point) => {
+    const price = Number(point.price_after);
+    if (Number.isFinite(price)) return price;
+    const probability = Number(point.probability);
+    return Number.isFinite(probability) ? probability * payout : null;
+  };
   const grouped = new Map();
-  points.forEach((point) => {
+  sourcePoints.forEach((point) => {
     if (!grouped.has(point.outcome_id)) grouped.set(point.outcome_id, { label: point.outcome_label, points: [] });
     grouped.get(point.outcome_id).points.push(point);
   });
   const series = [...grouped.values()]
-    .sort((a, b) => Number(b.points.at(-1)?.price_after || 0) - Number(a.points.at(-1)?.price_after || 0))
+    .sort((a, b) => Number(pointPrice(b.points.at(-1)) || 0) - Number(pointPrice(a.points.at(-1)) || 0))
     .slice(0, 6);
-  const sourceLabels = [...new Set(points.map((point) => point.created_at))];
+  const sourceLabels = [...new Set(sourcePoints.map((point) => point.created_at))];
   const labels = sourceLabels.length === 1
     ? [sourceLabels[0], new Date().toISOString()]
     : sourceLabels;
@@ -1734,9 +2140,9 @@ function renderMarketPriceChart(points) {
       datasets: series.map((item, index) => ({
         label: item.label,
         data: labels.map((label, labelIndex) => {
-          const exact = item.points.find((point) => point.created_at === label)?.price_after;
-          if (exact != null) return exact;
-          if (sourceLabels.length === 1 && labelIndex === 1) return item.points[0]?.price_after ?? null;
+          const exact = item.points.find((point) => point.created_at === label);
+          if (exact) return pointPrice(exact);
+          if (sourceLabels.length === 1 && labelIndex === 1) return pointPrice(item.points[0]);
           return null;
         }),
         borderColor: colors[index % colors.length],
@@ -1744,6 +2150,7 @@ function renderMarketPriceChart(points) {
         spanGaps: true,
         fill: false,
         tension: 0.25,
+        borderWidth: 2,
         pointRadius: labels.length > 12 ? 0 : 2,
         pointHoverRadius: 4
       }))
@@ -1752,8 +2159,27 @@ function renderMarketPriceChart(points) {
       responsive: true,
       maintainAspectRatio: false,
       scales: {
-        x: { display: false },
-        y: { ticks: { color: muted }, grid: { color: grid } }
+        x: {
+          display: false,
+          grid: { display: false },
+          border: { display: false }
+        },
+        y: {
+          min: 0,
+          max: payout,
+          ticks: {
+            color: muted,
+            maxTicksLimit: 5,
+            stepSize: payout / 4,
+            callback: (value) => `${Math.round((Number(value) / payout) * 100)}%`
+          },
+          grid: {
+            color: grid,
+            drawTicks: false,
+            lineWidth: 1
+          },
+          border: { display: false }
+        }
       },
       plugins: {
         legend: {
@@ -1764,7 +2190,7 @@ function renderMarketPriceChart(points) {
         tooltip: {
           callbacks: {
             title: (items) => new Date(labels[items[0].dataIndex]).toLocaleString(),
-            label: (item) => `${item.dataset.label}: ${money(item.raw)}`
+            label: (item) => `${item.dataset.label}: ${pct(Number(item.raw || 0) / payout)} implied (${money(item.raw)})`
           }
         }
       }
@@ -1803,10 +2229,14 @@ function renderMarketDetail() {
   const winningOutcome = outcomes.find((outcome) => Number(outcome.id) === Number(market.winning_outcome_id));
   const leadOutcome = outcomes[0] || {};
   const metrics = market.metrics || {};
-  const modelUpdated = market.model?.updated_at ? new Date(market.model.updated_at).toLocaleString() : "Unavailable";
+  const modelMark = market.model?.live_score_mark || null;
+  const modelLabel = modelMark ? "live model" : "model";
+  const modelUpdated = (modelMark?.updated_at || market.model?.updated_at)
+    ? new Date(modelMark?.updated_at || market.model?.updated_at).toLocaleString()
+    : "Unavailable";
   const settlesAutomatically = market.origin === "model";
   const automaticSettlementCopy = market.settlement_time
-    ? "Settles Tuesday at 1:00 AM ET from finalized Sleeper scores."
+    ? `${modelMark ? "Fair odds are marked from live Sleeper scores. " : ""}Settles Tuesday at 1:00 AM ET from finalized Sleeper scores.`
     : "Settles automatically from the official Sleeper result.";
   const stateBanner = market.status === "resolved"
     ? `<div class="market-state-banner resolved"><span>Settled</span><strong>${escapeHtml(winningOutcome?.label || "Winning outcome recorded")}</strong><small>Winning play-credit positions have been credited.</small></div>`
@@ -1835,9 +2265,9 @@ function renderMarketDetail() {
       </header>
       <div class="market-chart-stage"><canvas id="market-price-chart" aria-label="Market price chart"></canvas></div>
       <footer class="market-chart-summary">
-        <span><b>${pct(leadOutcome.model_probability || leadOutcome.prior_probability || 0)}</b> model</span>
+        <span><b>${pct(leadOutcome.model_probability || leadOutcome.prior_probability || 0)}</b> ${escapeHtml(modelLabel)}</span>
         <span><b>${Number(metrics.net_flow_24h || 0) >= 0 ? "+" : ""}${fmt(metrics.net_flow_24h || 0)} sh</b> 24h flow</span>
-        <span><b>${fmt(metrics.volume || 0)}</b> volume</span>
+        <span><b>${money(metrics.volume || 0)}</b> volume</span>
       </footer>
     </section>
     <div class="outcome-list-head"><div><strong>Trade outcomes</strong><span>Price reflects the market's implied probability.</span></div><span>${outcomes.length} contracts</span></div>
@@ -1847,7 +2277,7 @@ function renderMarketDetail() {
           ${outcomeAvatar(outcome)}
           <div>
             <strong>${escapeHtml(outcome.label)}</strong>
-            <span>${pct(outcome.model_probability)} model${Number(outcome.user_shares || 0) ? ` · You own ${fmt(outcome.user_shares)} sh` : ""}</span>
+            <span>${pct(outcome.model_probability)} ${escapeHtml(modelLabel)}${Number(outcome.user_shares || 0) ? ` · You own ${fmt(outcome.user_shares)} sh` : ""}</span>
             <span class="outcome-meter" aria-hidden="true"><i style="width: ${probabilityWidth(outcome.probability)}"></i></span>
           </div>
           <div class="outcome-actions">
@@ -1906,7 +2336,7 @@ function renderMarketDetail() {
     ` : ""}
   `;
   hydrateIcons();
-  renderMarketPriceChart(history);
+  renderMarketPriceChart(history, market);
   $("#market-detail").querySelectorAll("[data-order]").forEach((button) => {
     button.addEventListener("click", () => openOrderSheet(Number(button.dataset.order)));
   });
@@ -2280,20 +2710,19 @@ function renderPortfolio() {
   const demo = state.portfolio?.demo || {};
   const realized = Number(state.portfolio?.realized_profit || state.portfolio?.realized_pl || 0);
   const unrealized = Number(state.portfolio?.unrealized_profit || state.portfolio?.unrealized_pl || 0);
-  const allocations = [
-    { label: "Cash", detail: "Available bankroll", value: cash, color: "#64d2ff" },
-    ...positions
-      .filter((position) => Number(position.market_value) > 0)
-      .map((position, index) => ({
-        label: position.outcome_label || position.label,
-        detail: position.title,
-        value: Number(position.market_value),
-        color: ["#30d158", "#ffd60a", "#ff9f0a", "#bf5af2", "#5e5ce6", "#ff453a", "#00c7be"][index % 7]
-      }))
-  ].filter((item) => item.value > 0);
-
   const openValue = positions.reduce((sum, position) => sum + Number(position.market_value || 0), 0);
   const totalBook = cash + openValue;
+  const allocations = positions
+    .filter((position) => Number(position.market_value) > 0)
+    .map((position) => ({
+      label: position.outcome_label || position.label,
+      detail: position.title,
+      group: marketGroup(position),
+      shares: Number(position.shares || 0),
+      probability: Number(position.probability || 0),
+      value: Number(position.market_value || 0)
+    }))
+    .sort((a, b) => b.value - a.value);
   $("#portfolio-root").innerHTML = `
     ${demo.trade_count ? `
       <div class="demo-banner">
@@ -2314,7 +2743,7 @@ function renderPortfolio() {
         <article><span>Unrealized P/L</span><strong class="${unrealized >= 0 ? "good" : "bad"}">${money(unrealized)}</strong><small>Open contracts</small></article>
       </div>
     </section>
-    ${renderAllocationChart(allocations)}
+    ${renderAllocationChart(allocations, { cash, openValue, totalBook })}
     <div class="holdings-head">
       <span>Contract</span>
       <span>Exposure</span>
@@ -2337,7 +2766,7 @@ function renderPortfolio() {
       `).join("") || emptyState("No open positions", "Buy shares from a market to see holdings, exposure, and open value.", `<button type="button" data-empty-tab="markets">Find a Market</button>`)}
     </div>
   `;
-  renderAllocationCanvas(allocations);
+  renderAllocationCanvas();
   $("#portfolio-root")?.querySelector("[data-empty-tab]")?.addEventListener("click", (event) => {
     activateTab(event.currentTarget.dataset.emptyTab);
   });
@@ -2352,72 +2781,85 @@ function renderPortfolio() {
   `).join("") || emptyState("No ledger entries", "Orders, settlements, and demo activity will appear here as account receipts.");
 }
 
-function renderAllocationChart(allocations) {
-  const total = allocations.reduce((sum, item) => sum + item.value, 0);
+function renderAllocationChart(allocations, book = {}) {
+  const cash = Number(book.cash || 0);
+  const openValue = Number(book.openValue || allocations.reduce((sum, item) => sum + item.value, 0));
+  const total = Number(book.totalBook || cash + openValue);
   if (!total) {
     return `<div class="allocation-card">${emptyState("No allocation yet", "Cash and open positions will form your book once the first trade lands.")}</div>`;
   }
+  const largest = allocations[0];
+  const concentrationBase = openValue || total;
+  const totalShares = allocations.reduce((sum, item) => sum + Number(item.shares || 0), 0);
+  const exposureRows = allocations.slice(0, 6);
   return `
-    <div class="allocation-card">
-      <div class="allocation-chart">
-        <canvas id="allocation-chart" aria-hidden="true"></canvas>
-        <div class="allocation-total">
-          <span>Total</span>
-          <strong>${money(total)}</strong>
-        </div>
+    <div class="allocation-card book-composition-card">
+      <div class="allocation-total">
+        <span>Total Book</span>
+        <strong>${money(total)}</strong>
+        <small>${money(openValue)} open exposure</small>
       </div>
-      <div class="allocation-legend">
-        ${allocations.map((item) => `
-          <article title="${escapeHtml(item.detail)}">
-            <span style="--swatch:${item.color}"></span>
+      <div class="book-composition-main">
+        <section class="book-stack-panel" aria-label="Portfolio composition">
+          <div class="book-stack-head">
+            <span>Composition</span>
+            <strong>${allocationPct(openValue, total)} deployed</strong>
+          </div>
+          <div class="book-stack-track" aria-hidden="true">
+            <i class="cash" style="width:${ratioWidth(cash, total)}"></i>
+            <i class="open" style="width:${ratioWidth(openValue, total)}"></i>
+          </div>
+          <div class="book-stack-labels">
+            <span><i class="cash"></i>Cash ${money(cash)} · ${allocationPct(cash, total)}</span>
+            <span><i class="open"></i>Open ${money(openValue)} · ${allocationPct(openValue, total)}</span>
+          </div>
+        </section>
+        <section class="book-risk-grid" aria-label="Portfolio risk">
+          <article>
+            <span>Top Contract</span>
+            <strong>${largest ? escapeHtml(largest.label) : "Cash only"}</strong>
+            <small>${largest ? `${money(largest.value)} · ${escapeHtml(largest.group)}` : "No open contracts"}</small>
+          </article>
+          <article>
+            <span>Concentration</span>
+            <strong>${largest ? allocationPct(largest.value, concentrationBase) : "0%"}</strong>
+            <small>${largest ? "of open exposure" : "no open exposure"}</small>
+          </article>
+          <article>
+            <span>Contracts</span>
+            <strong>${fmt(totalShares)}</strong>
+            <small>${allocations.length} live ${allocations.length === 1 ? "position" : "positions"}</small>
+          </article>
+        </section>
+      </div>
+      <div class="exposure-rank-list" aria-label="Top portfolio exposures">
+        <div class="exposure-rank-head">
+          <span>Outcome</span>
+          <span>Market</span>
+          <span>Book</span>
+          <span>Value</span>
+        </div>
+        ${exposureRows.map((item) => `
+          <article class="exposure-rank-row ${exposureTone(item.value, total)}">
             <div>
               <strong>${escapeHtml(item.label)}</strong>
-              <small>${escapeHtml(item.detail)}</small>
+              <small>${fmt(item.shares)} sh · ${pct(item.probability)} implied</small>
+              <span class="exposure-rank-meter" aria-hidden="true"><i style="width:${ratioWidth(item.value, largest?.value || item.value)}"></i></span>
             </div>
+            <span class="exposure-rank-market">${escapeHtml(item.group)}</span>
             <b>${allocationPct(item.value, total)}</b>
+            <strong>${money(item.value)}</strong>
           </article>
-        `).join("")}
+        `).join("") || emptyState("All cash", "Open contract exposure will appear here once the first trade lands.")}
       </div>
     </div>
   `;
 }
 
-function renderAllocationCanvas(allocations) {
-  const canvas = $("#allocation-chart");
-  if (!canvas || !window.Chart) return;
-  if (state.allocationChart) state.allocationChart.destroy();
-  const total = allocations.reduce((sum, item) => sum + item.value, 0);
-  const styles = getComputedStyle(document.documentElement);
-  const panel = styles.getPropertyValue("--panel").trim() || "#090c11";
-  state.allocationChart = new Chart(canvas, {
-    type: "doughnut",
-    data: {
-      labels: allocations.map((item) => item.label),
-      datasets: [{
-        data: allocations.map((item) => item.value),
-        backgroundColor: allocations.map((item) => item.color),
-        borderColor: panel,
-        borderWidth: 3,
-        hoverOffset: 12,
-        spacing: 2
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: "62%",
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          displayColors: true,
-          callbacks: {
-            title: (items) => items[0]?.label || "",
-            label: (item) => `${money(item.raw)} · ${allocationPct(item.raw, total)}`
-          }
-        }
-      }
-    }
-  });
+function renderAllocationCanvas() {
+  if (!state.allocationChart) return;
+  state.allocationChart.destroy();
+  state.allocationChart = null;
 }
 
 function renderFund() {
@@ -2613,69 +3055,6 @@ function renderFundCanvas(allocations) {
   });
 }
 
-async function saveFundSettings() {
-  try {
-    const result = await api("/api/admin/fund/settings", {
-      method: "POST",
-      headers: { "X-Admin-Code": $("#admin-code").value },
-      body: JSON.stringify({
-        league_id: $("#league-id-input").value.trim(),
-        starting_balance: Number($("#fund-starting-balance").value || 0),
-        trophy_reserve: Number($("#fund-trophy-reserve").value || 0),
-        cup_reserve: Number($("#fund-cup-reserve").value || 0),
-        draft_reserve: Number($("#fund-draft-reserve").value || 0),
-        safety_buffer: Number($("#fund-safety-buffer").value || 0),
-        core_pct: Number($("#fund-core-pct").value || 0) / 100,
-        team_pct: Number($("#fund-team-pct").value || 0) / 100,
-        player_pct: Number($("#fund-player-pct").value || 0) / 100
-      })
-    });
-    state.fund = result;
-    renderFund();
-    notify("Fund settings saved", "success");
-  } catch (error) {
-    $("#admin-status").textContent = error.message;
-    notify(error.message, "warn");
-  }
-}
-
-async function syncSleeperFees() {
-  try {
-    const result = await api("/api/admin/fund/sync-sleeper-fees", {
-      method: "POST",
-      headers: { "X-Admin-Code": $("#admin-code").value },
-      body: JSON.stringify({
-        league_id: $("#league-id-input").value.trim(),
-        start_round: 1,
-        end_round: 18
-      })
-    });
-    state.fund = result.fund;
-    renderFund();
-    $("#admin-status").textContent = `Synced ${result.created} new Fund fee entries`;
-    notify(`Synced ${result.created} Sleeper fee entries`, result.errors?.length ? "warn" : "success");
-  } catch (error) {
-    $("#admin-status").textContent = error.message;
-    notify(error.message, "warn");
-  }
-}
-
-async function allocateSidequest() {
-  try {
-    const result = await api("/api/admin/fund/allocate-sidequest", {
-      method: "POST",
-      headers: { "X-Admin-Code": $("#admin-code").value },
-      body: JSON.stringify({ league_id: $("#league-id-input").value.trim() })
-    });
-    state.fund = result;
-    renderFund();
-    notify("Side Quest pool allocated", "success");
-  } catch (error) {
-    $("#admin-status").textContent = error.message;
-    notify(error.message, "warn");
-  }
-}
-
 function renderLeaderboard() {
   const activeRows = state.leaderboard.filter((row) => row.is_active);
   const idleRows = state.leaderboard.filter((row) => !row.is_active);
@@ -2738,6 +3117,7 @@ function wireEvents() {
   $("#logout-button").addEventListener("click", () => {
     localStorage.removeItem("leagueMarketToken");
     state.token = "";
+    stopRealtime();
     location.reload();
   });
   $("#refresh-button").addEventListener("click", async () => {
@@ -2838,31 +3218,6 @@ function wireEvents() {
       input.dataset.touched = "true";
     });
   });
-  $("#save-fund-settings").addEventListener("click", saveFundSettings);
-  $("#sync-sleeper-fees").addEventListener("click", syncSleeperFees);
-  $("#allocate-sidequest").addEventListener("click", allocateSidequest);
-  $("#fund-entry-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      const result = await api("/api/admin/fund/manual-entry", {
-        method: "POST",
-        headers: { "X-Admin-Code": $("#admin-code").value },
-        body: JSON.stringify({
-          league_id: $("#league-id-input").value.trim(),
-          entry_type: $("#fund-entry-type").value,
-          amount: Number($("#fund-entry-amount").value || 0),
-          description: $("#fund-entry-description").value
-        })
-      });
-      state.fund = result;
-      $("#fund-entry-form").reset();
-      renderFund();
-      notify("Fund entry added", "success");
-    } catch (error) {
-      $("#admin-status").textContent = error.message;
-      notify(error.message, "warn");
-    }
-  });
   $("#nav-toggle").addEventListener("click", () => {
     if (isMobileNavigation()) {
       state.mobileNavOpen = !state.mobileNavOpen;
@@ -2879,6 +3234,13 @@ function wireEvents() {
     render();
   });
   $("#tour-button").addEventListener("click", () => showTour(0));
+  $("#feedback-button").addEventListener("click", openFeedbackDialog);
+  $("#feedback-close").addEventListener("click", closeFeedbackDialog);
+  $("#feedback-cancel").addEventListener("click", closeFeedbackDialog);
+  $("#feedback-form").addEventListener("submit", submitFeedback);
+  $("#feedback-dialog").addEventListener("click", (event) => {
+    if (event.target.id === "feedback-dialog") closeFeedbackDialog();
+  });
   $("#tour-close").addEventListener("click", closeTour);
   $("#tour-prev").addEventListener("click", () => {
     state.tourStep -= 1;
@@ -2899,9 +3261,14 @@ function wireEvents() {
     const orderSheet = $("#order-sheet");
     const tour = $("#onboarding-overlay");
     const adminDialog = $("#admin-action-dialog");
+    const feedbackDialog = $("#feedback-dialog");
     if (event.key === "Escape") {
       if (!adminDialog.classList.contains("hidden")) {
         closeAdminActionDialog();
+        return;
+      }
+      if (!feedbackDialog.classList.contains("hidden")) {
+        closeFeedbackDialog();
         return;
       }
       if (!orderSheet.classList.contains("hidden")) {
@@ -2922,6 +3289,7 @@ function wireEvents() {
     trapDialogFocus(event, orderSheet);
     trapDialogFocus(event, tour);
     trapDialogFocus(event, adminDialog);
+    trapDialogFocus(event, feedbackDialog);
   });
   window.addEventListener("resize", () => {
     if (!isMobileNavigation() && state.mobileNavOpen) {
@@ -2937,7 +3305,7 @@ function wireEvents() {
   $("#join-league-id").addEventListener("input", () => {
     $("#join-league-id").dataset.touched = "true";
   });
-  document.querySelectorAll(".tabs button").forEach((button) => {
+  document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       activateTab(button.dataset.tab);
     });
@@ -2976,11 +3344,20 @@ function wireEvents() {
       renderAdminSettings();
       try {
         if (state.adminSettingsTab === "people") await Promise.all([loadManagers(), loadCommissionerManagement()]);
-        if (state.adminSettingsTab === "fund") await loadFund();
+        if (state.adminSettingsTab === "feedback") await loadFeedback();
       } catch (error) {
         notify(error.message, "warn");
       }
     });
+  });
+  $("#refresh-feedback").addEventListener("click", (event) => withAdminButton(event.currentTarget, "Refreshing...", loadFeedback));
+  $("#feedback-status-filter").addEventListener("change", async (event) => {
+    state.feedbackStatusFilter = event.currentTarget.value;
+    await loadFeedback().catch((error) => notify(error.message, "warn"));
+  });
+  $("#feedback-category-filter").addEventListener("change", async (event) => {
+    state.feedbackCategoryFilter = event.currentTarget.value;
+    await loadFeedback().catch((error) => notify(error.message, "warn"));
   });
   $("#admin-action-close").addEventListener("click", closeAdminActionDialog);
   $("#admin-action-dialog").addEventListener("click", (event) => {

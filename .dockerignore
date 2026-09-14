@@ -1,6 +1,11 @@
 .env
 .git
 node_modules
+.nuxt
+.output
+dist
+output
+public/static
 playwright-report
 test-results
 data/*.sqlite*

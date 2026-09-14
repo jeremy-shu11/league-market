@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 import os
+import random
 import secrets
 import sqlite3
 import threading
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -36,7 +39,30 @@ from sleeper import NflverseRankingsAdapter, SleeperAdapter
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = PROJECT_DIR / "frontend"
-DATA_DIR = PROJECT_DIR / "data"
+NUXT_PUBLIC_DIR = PROJECT_DIR / ".output" / "public"
+NUXT_ASSET_DIR = NUXT_PUBLIC_DIR / "_nuxt"
+TURSO_DATABASE_URL = (
+    os.environ.get("TURSO_DATABASE_URL")
+    or os.environ.get("LIBSQL_URL")
+    or os.environ.get("LIBSQL_DATABASE_URL")
+    or ""
+).strip()
+TURSO_AUTH_TOKEN = (
+    os.environ.get("TURSO_AUTH_TOKEN")
+    or os.environ.get("LIBSQL_AUTH_TOKEN")
+    or ""
+).strip()
+
+
+def env_flag(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+DEFAULT_DATA_DIR = Path("/tmp/league-market") if TURSO_DATABASE_URL else PROJECT_DIR / "data"
+DATA_DIR = Path(os.environ.get("LEAGUE_MARKET_DATA_DIR", DEFAULT_DATA_DIR))
 DB_PATH = Path(os.environ.get("LEAGUE_MARKET_DB", DATA_DIR / "market.sqlite"))
 RAW_DATA_DIR = Path(os.environ.get("LEAGUE_MARKET_RAW_DATA", DATA_DIR / "raw"))
 BACKUP_DIR = Path(os.environ.get("LEAGUE_MARKET_BACKUP_DIR", DB_PATH.parent / "backups"))
@@ -72,6 +98,9 @@ DEFAULT_CORE_ALLOCATION = 0.50
 DEFAULT_TEAM_ALLOCATION = 0.30
 DEFAULT_PLAYER_ALLOCATION = 0.20
 MODEL_SIMULATIONS = int(os.environ.get("LEAGUE_MARKET_SIMULATIONS", "20000"))
+LIVE_SCORE_SIMULATIONS = int(os.environ.get("LEAGUE_MARKET_LIVE_SCORE_SIMULATIONS", "5000"))
+LIVE_SCORE_MARK_INTERVAL_HOURS = float(os.environ.get("LEAGUE_MARKET_LIVE_SCORE_INTERVAL_HOURS", "0.08"))
+SCHEDULE_PIPELINE = env_flag("LEAGUE_MARKET_SCHEDULE_PIPELINE", True)
 ADMIN_SESSION_COOKIE = "league_market_admin"
 ADMIN_SESSION_HOURS = 8
 _SCHEMA_LOCK = threading.Lock()
@@ -87,6 +116,8 @@ def validate_runtime_config(
     invite_code: str = DEFAULT_INVITE_CODE,
     admin_code: str = DEFAULT_ADMIN_CODE,
 ) -> None:
+    if TURSO_DATABASE_URL and not TURSO_AUTH_TOKEN:
+        raise RuntimeError("TURSO_AUTH_TOKEN or LIBSQL_AUTH_TOKEN is required when using Turso/libSQL")
     if app_env != "production":
         return
     if invite_code == "theleague" or admin_code == "commissioner":
@@ -104,7 +135,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="League Market API",
+    title="The League Market API",
     lifespan=lifespan,
     docs_url=None if APP_ENV == "production" else "/docs",
     redoc_url=None if APP_ENV == "production" else "/redoc",
@@ -119,6 +150,8 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Participant-Token", "X-Admin-Code"],
 )
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+if NUXT_ASSET_DIR.exists():
+    app.mount("/_nuxt", StaticFiles(directory=NUXT_ASSET_DIR), name="nuxt")
 
 
 @app.middleware("http")
@@ -137,6 +170,10 @@ async def security_headers(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.url.path == "/":
         response.headers["Cache-Control"] = "no-store"
+    elif request.url.path.startswith("/_nuxt/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif request.url.path == "/_payload.json":
+        response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
     elif request.url.path in {"/static/app.js", "/static/styles.css"}:
         response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
     return response
@@ -255,6 +292,20 @@ class FundMarketPrizeRequest(BaseModel):
     payout_mode: str = Field(default="proportional_shares", pattern="^proportional_shares$")
 
 
+class FeedbackRequest(BaseModel):
+    category: Literal["bug", "confusing", "pricing_odds", "trade_flow", "settlement", "idea", "other"] = "other"
+    message: str = Field(min_length=3, max_length=2000)
+    page: str = Field(default="", max_length=80)
+    market_id: Optional[int] = None
+    market_title: str = Field(default="", max_length=160)
+    context: dict = Field(default_factory=dict)
+
+
+class FeedbackStatusRequest(BaseModel):
+    status: Literal["new", "reviewing", "resolved", "wont_fix"]
+    note: str = Field(default="", max_length=1000)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -273,7 +324,156 @@ def data_environment() -> str:
     return "test" if APP_ENV == "test" else "production"
 
 
-def db() -> sqlite3.Connection:
+def using_remote_database() -> bool:
+    return bool(TURSO_DATABASE_URL)
+
+
+def database_identity() -> str:
+    return f"libsql:{TURSO_DATABASE_URL}" if using_remote_database() else str(DB_PATH.resolve())
+
+
+def remote_database_url() -> str:
+    return TURSO_DATABASE_URL
+
+
+class RemoteDatabaseRow:
+    def __init__(self, columns: tuple[str, ...], values: tuple[Any, ...]):
+        self._columns = columns
+        self._values = values
+        self._index = {column: index for index, column in enumerate(columns)}
+
+    def __getitem__(self, key: int | str) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._values[self._index[key]]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __bool__(self) -> bool:
+        return bool(self._values)
+
+    def keys(self) -> tuple[str, ...]:
+        return self._columns
+
+    def get(self, key: str, default: Any = None) -> Any:
+        index = self._index.get(key)
+        return default if index is None else self._values[index]
+
+
+class RemoteDatabaseCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def _columns(self) -> tuple[str, ...]:
+        return tuple(column[0] for column in (self.description or ()))
+
+    def _wrap_row(self, row):
+        if row is None:
+            return None
+        if hasattr(row, "keys"):
+            return row
+        return RemoteDatabaseRow(self._columns(), tuple(row))
+
+    def fetchone(self):
+        return self._wrap_row(self._cursor.fetchone())
+
+    def fetchall(self):
+        rows = self._cursor.fetchall() or []
+        return [self._wrap_row(row) for row in rows]
+
+    def fetchmany(self, size: Optional[int] = None):
+        rows = self._cursor.fetchmany(size) if size is not None else self._cursor.fetchmany()
+        return [self._wrap_row(row) for row in (rows or [])]
+
+    def execute(self, sql: str, parameters=None):
+        cursor = self._cursor.execute(sql, parameters) if parameters is not None else self._cursor.execute(sql)
+        self._cursor = cursor
+        return self
+
+    def executemany(self, sql: str, parameters):
+        self._cursor = self._cursor.executemany(sql, parameters)
+        return self
+
+    def executescript(self, script: str):
+        self._cursor.executescript(script)
+        return self
+
+
+class RemoteDatabaseConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    @property
+    def in_transaction(self) -> bool:
+        return bool(getattr(self._connection, "in_transaction", False))
+
+    def execute(self, sql: str, parameters=None) -> RemoteDatabaseCursor:
+        cursor = self._connection.execute(sql, parameters) if parameters is not None else self._connection.execute(sql)
+        return RemoteDatabaseCursor(cursor)
+
+    def executemany(self, sql: str, parameters) -> RemoteDatabaseCursor:
+        return RemoteDatabaseCursor(self._connection.executemany(sql, parameters))
+
+    def executescript(self, script: str):
+        return self._connection.executescript(script)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
+        return False
+
+
+def begin_immediate(conn) -> None:
+    if not bool(getattr(conn, "in_transaction", False)):
+        conn.execute("BEGIN IMMEDIATE")
+
+
+def db():
+    if using_remote_database():
+        try:
+            import libsql
+        except ImportError as error:
+            raise RuntimeError("Install the libsql package to use TURSO_DATABASE_URL") from error
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        connection = libsql.connect(str(DB_PATH), sync_url=remote_database_url(), auth_token=TURSO_AUTH_TOKEN)
+        sync = getattr(connection, "sync", None)
+        if callable(sync):
+            sync()
+        connection.execute("PRAGMA foreign_keys = ON")
+        return RemoteDatabaseConnection(connection)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
@@ -284,7 +484,7 @@ def db() -> sqlite3.Connection:
 
 def configure_database() -> None:
     global _DB_CONFIG_READY_PATH
-    resolved_path = str(DB_PATH.resolve())
+    resolved_path = database_identity()
     if _DB_CONFIG_READY_PATH == resolved_path:
         return
     with _DB_CONFIG_LOCK:
@@ -295,6 +495,8 @@ def configure_database() -> None:
 
 
 def _configure_database_unchecked() -> None:
+    if using_remote_database():
+        return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     try:
@@ -306,6 +508,16 @@ def _configure_database_unchecked() -> None:
 
 
 def create_database_backup() -> dict:
+    if using_remote_database():
+        return {
+            "provider": "turso/libsql",
+            "managed": True,
+            "path": None,
+            "bytes": None,
+            "created_at": now_iso(),
+            "integrity_check": "managed",
+            "note": "Remote libSQL storage is active; use the database provider's restore tooling for backups.",
+        }
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = BACKUP_DIR / f"market-{stamp}.sqlite"
@@ -640,6 +852,22 @@ def _execute_schema_unchecked() -> None:
                 paid_at TEXT,
                 UNIQUE(market_id, participant_id, outcome_id)
             );
+            CREATE TABLE IF NOT EXISTS feedback_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                league_id TEXT NOT NULL,
+                participant_id INTEGER REFERENCES participants(id),
+                category TEXT NOT NULL,
+                message TEXT NOT NULL,
+                page TEXT NOT NULL DEFAULT '',
+                market_id INTEGER,
+                market_title TEXT NOT NULL DEFAULT '',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                user_agent TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'new',
+                admin_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         migrate_schema(conn)
@@ -655,7 +883,7 @@ def _execute_schema_unchecked() -> None:
 
 def execute_schema() -> None:
     global _SCHEMA_READY_PATH
-    resolved_path = str(DB_PATH.resolve())
+    resolved_path = database_identity()
     if _SCHEMA_READY_PATH == resolved_path:
         return
     with _SCHEMA_LOCK:
@@ -721,6 +949,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_fund_prizes_league ON fund_market_prizes(league_id);
         CREATE INDEX IF NOT EXISTS idx_fund_payouts_league ON fund_payouts(league_id);
         CREATE INDEX IF NOT EXISTS idx_fund_payouts_market ON fund_payouts(market_id);
+        CREATE INDEX IF NOT EXISTS idx_feedback_league_status ON feedback_items(league_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_feedback_market ON feedback_items(market_id);
         """
     )
     run_numbered_migrations(conn)
@@ -1009,15 +1239,32 @@ def frontend_asset_version() -> str:
         FRONTEND_DIR / "vendor" / "chart.umd.js",
         FRONTEND_DIR / "vendor" / "lucide.min.js",
     ]
+    if (NUXT_PUBLIC_DIR / "index.html").exists():
+        files.append(NUXT_PUBLIC_DIR / "index.html")
     signature = ":".join(str(path.stat().st_mtime_ns) for path in files)
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
 
 
+def frontend_index_path() -> Path:
+    nuxt_index = NUXT_PUBLIC_DIR / "index.html"
+    if nuxt_index.exists():
+        return nuxt_index
+    return FRONTEND_DIR / "index.html"
+
+
 @app.get("/")
 def index() -> HTMLResponse:
-    document = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    document = frontend_index_path().read_text(encoding="utf-8")
     document = document.replace("__ASSET_VERSION__", frontend_asset_version())
     return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/_payload.json", include_in_schema=False)
+def nuxt_payload() -> FileResponse:
+    payload = NUXT_PUBLIC_DIR / "_payload.json"
+    if not payload.exists():
+        raise HTTPException(status_code=404, detail="Nuxt payload not generated")
+    return FileResponse(payload, media_type="application/json")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:
@@ -1084,6 +1331,149 @@ def record_admin_event(
             now_iso(),
         ),
     )
+
+
+def compact_feedback_context(context: dict) -> str:
+    try:
+        payload = json.dumps(context or {}, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        payload = "{}"
+    if len(payload) > 4000:
+        return json.dumps({"truncated": True}, separators=(",", ":"))
+    return payload
+
+
+def feedback_item_payload(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    try:
+        context = json.loads(item.pop("context_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        context = {}
+    item["context"] = context
+    item["display_name"] = item.get("display_name") or "Unknown tester"
+    return item
+
+
+def feedback_items_payload(
+    conn: sqlite3.Connection,
+    league_id: str,
+    status: str = "open",
+    category: str = "all",
+) -> dict:
+    league_id = normalize_league_id(league_id)
+    where = ["f.league_id = ?"]
+    args: list = [league_id]
+    if status == "open":
+        where.append("f.status IN ('new', 'reviewing')")
+    elif status != "all":
+        if status not in {"new", "reviewing", "resolved", "wont_fix"}:
+            raise HTTPException(status_code=400, detail="Invalid feedback status")
+        where.append("f.status = ?")
+        args.append(status)
+    if category != "all":
+        if category not in {"bug", "confusing", "pricing_odds", "trade_flow", "settlement", "idea", "other"}:
+            raise HTTPException(status_code=400, detail="Invalid feedback category")
+        where.append("f.category = ?")
+        args.append(category)
+    rows = conn.execute(
+        f"""
+        SELECT f.*, p.display_name
+        FROM feedback_items f
+        LEFT JOIN participants p ON p.id = f.participant_id
+        WHERE {" AND ".join(where)}
+        ORDER BY
+          CASE f.status WHEN 'new' THEN 0 WHEN 'reviewing' THEN 1 WHEN 'resolved' THEN 2 ELSE 3 END,
+          f.id DESC
+        LIMIT 100
+        """,
+        tuple(args),
+    ).fetchall()
+    status_counts = {
+        row["status"]: int(row["count"])
+        for row in conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM feedback_items
+            WHERE league_id = ?
+            GROUP BY status
+            """,
+            (league_id,),
+        ).fetchall()
+    }
+    category_counts = {
+        row["category"]: int(row["count"])
+        for row in conn.execute(
+            """
+            SELECT category, COUNT(*) AS count
+            FROM feedback_items
+            WHERE league_id = ?
+            GROUP BY category
+            """,
+            (league_id,),
+        ).fetchall()
+    }
+    return {
+        "league": active_league_meta(conn, league_id),
+        "feedback": [feedback_item_payload(row) for row in rows],
+        "summary": {"statuses": status_counts, "categories": category_counts},
+    }
+
+
+def realtime_revision(conn: sqlite3.Connection, league_id: str) -> dict:
+    league_id = normalize_league_id(league_id)
+    environments = visible_market_environments()
+    placeholders = ",".join("?" for _ in environments)
+    market_event = conn.execute(
+        f"""
+        SELECT COALESCE(MAX(me.id), 0) AS value
+        FROM market_events me
+        JOIN markets m ON m.id = me.market_id
+        WHERE m.league_id = ? AND m.visibility = 'public' AND m.environment IN ({placeholders})
+        """,
+        (league_id, *environments),
+    ).fetchone()["value"]
+    trade = conn.execute(
+        f"""
+        SELECT COALESCE(MAX(t.id), 0) AS value
+        FROM trades t
+        JOIN markets m ON m.id = t.market_id
+        WHERE m.league_id = ? AND m.visibility = 'public' AND m.environment IN ({placeholders})
+        """,
+        (league_id, *environments),
+    ).fetchone()["value"]
+    model_run = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM model_runs WHERE league_id = ?",
+        (league_id,),
+    ).fetchone()["value"]
+    job_run = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM job_runs WHERE league_id = ?",
+        (league_id,),
+    ).fetchone()["value"]
+    fund_entry = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM fund_ledger_entries WHERE league_id = ?",
+        (league_id,),
+    ).fetchone()["value"]
+    feedback = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM feedback_items WHERE league_id = ?",
+        (league_id,),
+    ).fetchone()["value"]
+    participant = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM participants WHERE league_id = ?",
+        (league_id,),
+    ).fetchone()["value"]
+    signature = f"{market_event}:{trade}:{model_run}:{job_run}:{fund_entry}:{feedback}:{participant}"
+    return {
+        "league_id": league_id,
+        "signature": signature,
+        "market_event_id": int(market_event or 0),
+        "trade_id": int(trade or 0),
+        "model_run_id": int(model_run or 0),
+        "job_run_id": int(job_run or 0),
+        "fund_entry_id": int(fund_entry or 0),
+        "feedback_id": int(feedback or 0),
+        "participant_id": int(participant or 0),
+        "generated_at": now_iso(),
+    }
 
 
 @app.middleware("http")
@@ -1227,12 +1617,18 @@ def active_league_meta(conn: sqlite3.Connection, league_id: str = DEFAULT_LEAGUE
         }
     payload = json.loads(row["payload_json"])
     league = payload.get("league") or {}
+    rosters = payload.get("rosters") or []
+    managers = stored_managers(conn, league_id)
+    if not managers:
+        managers = manager_records_from_snapshot(payload, league_id)
     return {
         "league_id": row["league_id"],
         "name": league.get("name") or "Sleeper League",
         "season": str(league.get("season") or "2026"),
         "synced_at": row["created_at"],
-        "total_rosters": league.get("total_rosters"),
+        "total_rosters": league.get("total_rosters") or len(rosters) or None,
+        "roster_count": len(rosters) or league.get("total_rosters"),
+        "manager_count": len(managers),
     }
 
 
@@ -2026,6 +2422,407 @@ def append_market_event_with_ticks(
     return revision
 
 
+def live_week_started(matchups: list[dict]) -> bool:
+    for entry in matchups:
+        if isinstance(entry.get("points"), (int, float)) and abs(float(entry["points"])) > 0.001:
+            return True
+        starter_points = entry.get("starters_points")
+        if isinstance(starter_points, list) and any(
+            isinstance(value, (int, float)) and abs(float(value)) > 0.001 for value in starter_points
+        ):
+            return True
+        player_points = entry.get("players_points")
+        if isinstance(player_points, dict) and any(
+            isinstance(value, (int, float)) and abs(float(value)) > 0.001 for value in player_points.values()
+        ):
+            return True
+    return False
+
+
+def starter_progress_from_matchup(entry: dict, expected_mean: float) -> float:
+    starter_points = entry.get("starters_points")
+    if isinstance(starter_points, list) and starter_points:
+        numeric = [float(value) for value in starter_points if isinstance(value, (int, float))]
+        if numeric:
+            return min(1.0, max(0.0, sum(1 for value in numeric if abs(value) > 0.001) / len(starter_points)))
+    points = float(entry.get("points") or 0.0) if isinstance(entry.get("points"), (int, float)) else 0.0
+    if points <= 0 or expected_mean <= 0:
+        return 0.0
+    return min(0.95, max(0.0, points / expected_mean))
+
+
+def live_starter_projection_context(
+    entry: dict,
+    player_projections: Optional[dict[str, float]],
+    expected_mean: float,
+) -> dict:
+    starters = [str(player_id) for player_id in entry.get("starters") or [] if player_id not in {None, "", "0"}]
+    player_points = entry.get("players_points") if isinstance(entry.get("players_points"), dict) else {}
+    starter_points = entry.get("starters_points") if isinstance(entry.get("starters_points"), list) else []
+    points = float(entry.get("points") or 0.0) if isinstance(entry.get("points"), (int, float)) else 0.0
+
+    if starters and player_projections:
+        projected_by_starter = {
+            player_id: max(0.0, float(player_projections.get(player_id) or 0.0))
+            for player_id in starters
+        }
+        projected_total = sum(projected_by_starter.values())
+        has_enough_projection_coverage = projected_total >= max(1.0, expected_mean * 0.45)
+        if has_enough_projection_coverage:
+            scored_starters = set()
+            for index, player_id in enumerate(starters):
+                value = player_points.get(player_id)
+                if not isinstance(value, (int, float)) and index < len(starter_points):
+                    value = starter_points[index]
+                if isinstance(value, (int, float)) and abs(float(value)) > 0.001:
+                    scored_starters.add(player_id)
+            remaining_mean = sum(
+                projected
+                for player_id, projected in projected_by_starter.items()
+                if player_id not in scored_starters
+            )
+            return {
+                "actual_score": points,
+                "remaining_mean": remaining_mean,
+                "progress": min(1.0, max(0.0, 1.0 - (remaining_mean / projected_total if projected_total else 0.0))),
+                "starter_count": len(starters),
+                "scored_starters": len(scored_starters),
+                "projection_basis": "starter_projection",
+            }
+
+    progress = starter_progress_from_matchup(entry, expected_mean)
+    return {
+        "actual_score": points,
+        "remaining_mean": max(0.0, expected_mean * (1.0 - progress)),
+        "progress": progress,
+        "starter_count": len(starters),
+        "scored_starters": 0,
+        "projection_basis": "roster_progress",
+    }
+
+
+def live_week_score_probabilities(
+    *,
+    league_id: str,
+    season: str,
+    week: int,
+    model_run_id: int,
+    estimates: dict[int, tuple[float, float]],
+    matchups: list[dict],
+    player_projections: Optional[dict[str, float]] = None,
+    simulation_count: int = LIVE_SCORE_SIMULATIONS,
+) -> dict:
+    if simulation_count < 100:
+        raise ValueError("At least 100 simulations are required")
+    roster_ids = sorted(estimates)
+    matchup_by_roster = {
+        int(entry["roster_id"]): entry
+        for entry in matchups
+        if entry.get("roster_id") is not None
+    }
+    if not roster_ids or any(roster_id not in matchup_by_roster for roster_id in roster_ids):
+        return {"available": False, "reason": "missing_roster_scores"}
+    contexts = {
+        roster_id: live_starter_projection_context(
+            matchup_by_roster[roster_id],
+            player_projections,
+            estimates[roster_id][0],
+        )
+        for roster_id in roster_ids
+    }
+    actual_scores = {roster_id: float(contexts[roster_id]["actual_score"]) for roster_id in roster_ids}
+    progress = {roster_id: float(contexts[roster_id]["progress"]) for roster_id in roster_ids}
+    projected_remaining = {roster_id: float(contexts[roster_id]["remaining_mean"]) for roster_id in roster_ids}
+    top_counts = {roster_id: 0 for roster_id in roster_ids}
+    low_counts = {roster_id: 0 for roster_id in roster_ids}
+    seed = int(model_fingerprint({
+        "league_id": league_id,
+        "season": season,
+        "week": week,
+        "model_run_id": model_run_id,
+        "scores": {str(key): round(value, 4) for key, value in actual_scores.items()},
+        "progress": {str(key): round(value, 4) for key, value in progress.items()},
+        "projected_remaining": {str(key): round(value, 4) for key, value in projected_remaining.items()},
+    })[:15], 16)
+    rng = random.Random(seed)
+    for _ in range(simulation_count):
+        simulated = {}
+        for roster_id in roster_ids:
+            mean, stdev = estimates[roster_id]
+            remaining_mean = max(0.0, projected_remaining[roster_id])
+            remaining_fraction = min(1.0, remaining_mean / mean) if mean > 0 else 0.0
+            if remaining_mean <= 0.001 or remaining_fraction <= 0.001:
+                remaining = 0.0
+            else:
+                remaining_stdev = max(4.0, stdev * math.sqrt(remaining_fraction))
+                remaining = max(0.0, rng.gauss(remaining_mean, remaining_stdev))
+            simulated[roster_id] = actual_scores[roster_id] + remaining
+        top_counts[max(roster_ids, key=lambda roster_id: (simulated[roster_id], -roster_id))] += 1
+        low_counts[min(roster_ids, key=lambda roster_id: (simulated[roster_id], roster_id))] += 1
+    denominator = simulation_count + 0.5 * len(roster_ids)
+    return {
+        "available": True,
+        "seed": seed,
+        "simulation_count": simulation_count,
+        "scores": actual_scores,
+        "progress": progress,
+        "projected_remaining": projected_remaining,
+        "starter_context": {
+            roster_id: {
+                "starter_count": int(contexts[roster_id]["starter_count"]),
+                "scored_starters": int(contexts[roster_id]["scored_starters"]),
+                "projection_basis": contexts[roster_id]["projection_basis"],
+            }
+            for roster_id in roster_ids
+        },
+        "probabilities": {
+            "week_top": {roster_id: (count + 0.5) / denominator for roster_id, count in top_counts.items()},
+            "week_low": {roster_id: (count + 0.5) / denominator for roster_id, count in low_counts.items()},
+        },
+    }
+
+
+def weekly_mark_targets(conn: sqlite3.Connection, league_id: str, season: str, week: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, status, contract_key, latest_model_run_id, model_run_id
+        FROM markets
+        WHERE league_id = ? AND origin = 'model' AND visibility = 'public'
+          AND status IN ('open', 'closed')
+          AND contract_key IN (?, ?)
+        ORDER BY id
+        """,
+        (
+            normalize_league_id(league_id),
+            f"model:{normalize_league_id(league_id)}:{season}:week:{week}:week_top",
+            f"model:{normalize_league_id(league_id)}:{season}:week:{week}:week_low",
+        ),
+    ).fetchall()
+
+
+def model_player_projections(conn: sqlite3.Connection, model_run_id: int) -> dict[str, float]:
+    return {
+        str(row["player_id"]): float(row["projected_points"])
+        for row in conn.execute(
+            """
+            SELECT po.player_id, po.projected_points
+            FROM model_run_inputs mri
+            JOIN ingestion_runs ir ON ir.id = mri.ingestion_run_id
+            JOIN projection_observations po ON po.ingestion_run_id = ir.id
+            WHERE mri.model_run_id = ? AND ir.dataset = 'weekly_projections'
+            """,
+            (model_run_id,),
+        ).fetchall()
+    }
+
+
+def apply_live_score_mark(
+    conn: sqlite3.Connection,
+    *,
+    league_id: str,
+    season: str,
+    week: int,
+    model_run_id: int,
+    ingestion_run_id: Optional[int],
+    matchups: list[dict],
+    actor_type: str,
+    as_of: Optional[datetime] = None,
+    simulation_count: int = LIVE_SCORE_SIMULATIONS,
+) -> dict:
+    estimates = {
+        int(row["roster_id"]): (float(row["projected_mean"]), float(row["projected_stdev"]))
+        for row in conn.execute(
+            "SELECT roster_id, projected_mean, projected_stdev FROM team_score_estimates WHERE model_run_id = ?",
+            (model_run_id,),
+        ).fetchall()
+    }
+    player_projections = model_player_projections(conn, model_run_id)
+    live = live_week_score_probabilities(
+        league_id=league_id,
+        season=season,
+        week=week,
+        model_run_id=model_run_id,
+        estimates=estimates,
+        matchups=matchups,
+        player_projections=player_projections,
+        simulation_count=simulation_count,
+    )
+    if not live.get("available"):
+        return {"marked": 0, "closed": 0, "reason": live.get("reason") or "unavailable"}
+    started = live_week_started(matchups)
+    if not started:
+        return {"marked": 0, "closed": 0, "started": False, "reason": "no_live_points"}
+    marked = []
+    closed = []
+    current = (as_of or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    for market in weekly_mark_targets(conn, league_id, season, week):
+        family = automated_resolution_family(market["contract_key"])
+        if family not in {"week_top", "week_low"}:
+            continue
+        probabilities = live["probabilities"][family]
+        existing_rows = conn.execute(
+            "SELECT id, source_ref, model_probability FROM outcomes WHERE market_id = ?",
+            (market["id"],),
+        ).fetchall()
+        updates = []
+        max_delta = 0.0
+        for row in existing_rows:
+            source_ref = str(row["source_ref"])
+            if not source_ref.startswith("roster:") or source_ref.count(":") != 1:
+                continue
+            roster_id = int(source_ref.split(":", 1)[1])
+            probability = float(probabilities.get(roster_id, 0.0))
+            previous = float(row["model_probability"] or 0.0)
+            max_delta = max(max_delta, abs(probability - previous))
+            updates.append((probability, int(row["id"])))
+        should_mark = max_delta >= 0.00005
+        if market["status"] == "open":
+            conn.execute(
+                "UPDATE markets SET status = 'closed', closed_at = COALESCE(closed_at, ?) WHERE id = ?",
+                (current, market["id"]),
+            )
+            append_market_event_with_ticks(
+                conn,
+                int(market["id"]),
+                "closed",
+                actor_type,
+                {
+                    "season": season,
+                    "week": week,
+                    "reason": "sleeper_live_score_started",
+                    "ingestion_run_id": ingestion_run_id,
+                },
+            )
+            closed.append(int(market["id"]))
+        if not should_mark:
+            continue
+        conn.executemany("UPDATE outcomes SET model_probability = ? WHERE id = ?", updates)
+        append_market_event_with_ticks(
+            conn,
+            int(market["id"]),
+            "live_score_mark",
+            actor_type,
+            {
+                "season": season,
+                "week": week,
+                "model_run_id": model_run_id,
+                "ingestion_run_id": ingestion_run_id,
+                "simulation_count": live["simulation_count"],
+                "seed": live["seed"],
+                "scores": {str(key): round(value, 2) for key, value in live["scores"].items()},
+                "progress": {str(key): round(value, 4) for key, value in live["progress"].items()},
+                "projected_remaining": {str(key): round(value, 2) for key, value in live["projected_remaining"].items()},
+                "starter_context": live["starter_context"],
+                "policy": "actual_sleeper_points_plus_unscored_starter_projection",
+            },
+        )
+        marked.append(int(market["id"]))
+    return {
+        "marked": len(marked),
+        "market_ids": marked,
+        "closed": len(closed),
+        "closed_market_ids": closed,
+        "started": True,
+        "week": week,
+        "season": season,
+        "score_count": len(live["scores"]),
+    }
+
+
+def run_live_score_mark_operation(
+    league_id: str = DEFAULT_LEAGUE_ID,
+    actor_type: str = "scheduler",
+    matchups_override: Optional[list[dict]] = None,
+    as_of: Optional[datetime] = None,
+    simulation_count: int = LIVE_SCORE_SIMULATIONS,
+) -> dict:
+    league_id = normalize_league_id(league_id)
+    with db() as conn:
+        model = conn.execute(
+            """
+            SELECT id, season, week FROM model_runs
+            WHERE league_id = ? AND status = 'succeeded'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (league_id,),
+        ).fetchone()
+        if not model:
+            return {"fetched": False, "marked": 0, "closed": 0, "reason": "no_model_run"}
+        season = str(model["season"])
+        week = int(model["week"])
+        targets = weekly_mark_targets(conn, league_id, season, week)
+        if not targets:
+            return {"fetched": False, "marked": 0, "closed": 0, "reason": "no_active_weekly_markets"}
+
+    if matchups_override is None:
+        try:
+            matchups = SleeperAdapter.get_matchups(league_id, week)
+        except Exception as error:
+            with db() as conn:
+                record_ingestion_error(
+                    conn,
+                    provider="sleeper",
+                    dataset="live_matchups",
+                    league_id=league_id,
+                    season=season,
+                    week=week,
+                    error=str(error),
+                )
+            raise HTTPException(status_code=502, detail=f"Sleeper live scoring refresh failed: {error}") from error
+    else:
+        matchups = deepcopy(matchups_override)
+
+    with db() as conn:
+        ingestion = record_ingestion(
+            conn,
+            provider="sleeper",
+            dataset="live_matchups",
+            league_id=league_id,
+            season=season,
+            week=week,
+            payload=matchups,
+            artifact_dir=RAW_DATA_DIR,
+        )
+        if not ingestion.get("deduplicated"):
+            conn.execute(
+                """
+                INSERT INTO source_snapshots (source, league_id, payload_json, created_at)
+                VALUES ('sleeper_live_score', ?, ?, ?)
+                """,
+                (
+                    league_id,
+                    json.dumps(
+                        {
+                            "source": "sleeper",
+                            "provenance": "live_score_mark",
+                            "league": {"league_id": league_id, "season": season, "settings": {"leg": week}},
+                            "matchups": {str(week): matchups},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    now_iso(),
+                ),
+            )
+        result = apply_live_score_mark(
+            conn,
+            league_id=league_id,
+            season=season,
+            week=week,
+            model_run_id=int(model["id"]),
+            ingestion_run_id=int(ingestion["id"]) if ingestion.get("id") is not None else None,
+            matchups=matchups,
+            actor_type=actor_type,
+            as_of=as_of,
+            simulation_count=simulation_count,
+        )
+        return {
+            "fetched": True,
+            "ingestion_run_id": int(ingestion["id"]) if ingestion.get("id") is not None else None,
+            "deduplicated": bool(ingestion.get("deduplicated")),
+            **result,
+        }
+
+
 def originate_modeled_markets(conn: sqlite3.Connection, league_id: str, model_run_id: Optional[int] = None) -> dict:
     league_id = normalize_league_id(league_id)
     if model_run_id is None:
@@ -2445,6 +3242,15 @@ def market_model_meta(conn: sqlite3.Connection, market: dict) -> dict:
     ).fetchone()
     if not row:
         return {"available": False, "version": None, "updated_at": None, "coverage": None}
+    live_mark = conn.execute(
+        """
+        SELECT payload_json, created_at FROM market_events
+        WHERE market_id = ? AND event_type = 'live_score_mark'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (market["id"],),
+    ).fetchone()
+    live_payload = json.loads(live_mark["payload_json"]) if live_mark else None
     return {
         "available": True,
         "run_id": model_run_id,
@@ -2452,6 +3258,17 @@ def market_model_meta(conn: sqlite3.Connection, market: dict) -> dict:
         "simulations": row["simulation_count"],
         "coverage": round(float(row["coverage"]), 4),
         "updated_at": row["created_at"],
+        "mark_source": "live_scores" if live_mark else "projection_model",
+        "live_score_mark": (
+            {
+                "updated_at": live_mark["created_at"],
+                "week": live_payload.get("week"),
+                "score_count": len(live_payload.get("scores") or {}),
+                "policy": live_payload.get("policy"),
+            }
+            if live_mark and isinstance(live_payload, dict)
+            else None
+        ),
     }
 
 
@@ -3541,7 +4358,8 @@ def admin_overview_payload(conn: sqlite3.Connection, league_id: str) -> dict:
 
     projection_age = age_hours(projection_run.get("fetched_at") if projection_run else None)
     model_age = age_hours(model.get("created_at") if model else None)
-    backup_files = sorted(BACKUP_DIR.glob("market-*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True)
+    managed_database = using_remote_database()
+    backup_files = [] if managed_database else sorted(BACKUP_DIR.glob("market-*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True)
     latest_backup = backup_files[0] if backup_files else None
     backup_age = (
         max(0.0, (now.timestamp() - latest_backup.stat().st_mtime) / 3600) if latest_backup else None
@@ -3568,7 +4386,7 @@ def admin_overview_payload(conn: sqlite3.Connection, league_id: str) -> dict:
         warn("identity_unlinked", "attention", "Participant identities need review", f"{unlinked} participant accounts are not linked to Sleeper managers.", "Open people")
     if not managers:
         warn("managers_missing", "attention", "Manager directory is empty", "Sleeper managers have not been loaded for this league.", "Refresh data")
-    if backup_age is None or backup_age > 24:
+    if not managed_database and (backup_age is None or backup_age > 24):
         detail = "No database backup was found." if backup_age is None else f"The newest backup is {backup_age:.1f} hours old."
         warn("backup_stale", "attention", "Backup required", detail, "Create backup")
     failed_runs = conn.execute(
@@ -3609,6 +4427,7 @@ def admin_overview_payload(conn: sqlite3.Connection, league_id: str) -> dict:
             "invites": len(invites),
         },
         "backup": {
+            "managed_by": "turso/libSQL" if managed_database else None,
             "path": str(latest_backup) if latest_backup else None,
             "created_at": datetime.fromtimestamp(latest_backup.stat().st_mtime, timezone.utc).isoformat() if latest_backup else None,
             "age_hours": round(backup_age, 2) if backup_age is not None else None,
@@ -3710,6 +4529,7 @@ def admin_dashboard_payload(conn: sqlite3.Connection, league_id: str) -> dict:
 
     automation_config = {
         "pipeline": {"hours": 24.0, "label": "Data pipeline", "severity": "blocked"},
+        "live_scores": {"hours": LIVE_SCORE_MARK_INTERVAL_HOURS, "label": "Live scoring marks", "severity": "attention"},
         "lifecycle": {"hours": 0.25, "label": "Market lifecycle", "severity": "attention"},
         "backup": {"hours": 24.0, "label": "Database backup", "severity": "attention"},
     }
@@ -3807,6 +4627,26 @@ def admin_dashboard_payload(conn: sqlite3.Connection, league_id: str) -> dict:
             f"{row['participant_count']} recipients · ${float(row['total'] or 0):,.2f}",
             "Review",
             dict(row),
+        )
+
+    feedback_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM feedback_items
+        WHERE league_id = ? AND status IN ('new', 'reviewing')
+        """,
+        (league_id,),
+    ).fetchone()["count"]
+    if feedback_count:
+        add_action(
+            "feedback:open",
+            "feedback_review",
+            45,
+            "attention",
+            "Review beta feedback",
+            f"{feedback_count} tester note{'s' if feedback_count != 1 else ''} waiting for triage",
+            "Open",
+            {"settings_tab": "feedback"},
         )
 
     participants = participant_admin_rows(conn, league_id)
@@ -4042,6 +4882,45 @@ def ticker(x_participant_token: Optional[str] = Header(default=None)) -> dict:
         return {"items": ticker_items(conn, league_id)}
 
 
+@app.get("/api/events")
+async def events(
+    request: Request,
+    token: str = Query(default=""),
+    x_participant_token: Optional[str] = Header(default=None),
+):
+    execute_schema()
+    auth_token = x_participant_token or token
+    with db() as conn:
+        participant = get_participant(conn, auth_token)
+        league_id = normalize_league_id(participant.get("league_id"))
+
+    async def stream():
+        last_signature = ""
+        heartbeat = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                with db() as conn:
+                    revision = realtime_revision(conn, league_id)
+                if revision["signature"] != last_signature:
+                    last_signature = revision["signature"]
+                    yield f"event: market_update\ndata: {json.dumps(revision, separators=(',', ':'))}\n\n"
+                elif heartbeat >= 10:
+                    heartbeat = 0
+                    yield ": heartbeat\n\n"
+                heartbeat += 1
+            except Exception as error:
+                yield f"event: stream_error\ndata: {json.dumps({'detail': str(error)[:200]}, separators=(',', ':'))}\n\n"
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/markets/{market_id}")
 def get_market(market_id: int, x_participant_token: Optional[str] = Header(default=None)) -> dict:
     execute_schema()
@@ -4083,8 +4962,7 @@ def apply_trade(
     max_cost: Optional[float] = None,
     min_proceeds: Optional[float] = None,
 ) -> dict:
-    if not conn.in_transaction:
-        conn.execute("BEGIN IMMEDIATE")
+    begin_immediate(conn)
     participant = dict(conn.execute("SELECT * FROM participants WHERE id = ?", (participant["id"],)).fetchone())
     quote = quote_trade(conn, participant, market_id, outcome_id, shares, side)
     if not is_demo and market_revision is None:
@@ -4900,6 +5778,25 @@ def admin_run_pipeline(
     )
 
 
+@app.post("/api/admin/live-scores/run")
+def admin_run_live_scores(
+    request: Request,
+    payload: SyncSleeperRequest = SyncSleeperRequest(),
+    x_admin_code: Optional[str] = Header(default=None),
+) -> dict:
+    require_admin(x_admin_code)
+    execute_schema()
+    league_id = normalize_league_id(payload.league_id)
+    actor = admin_request_actor(request)
+    actor_type = "commissioner" if actor["method"] == "session" else "scheduler"
+    return run_tracked_job(
+        league_id,
+        "live_scores",
+        actor_type,
+        lambda: run_live_score_mark_operation(league_id, actor_type=actor_type),
+    )
+
+
 @app.get("/api/admin/model-runs/latest")
 def admin_latest_model_run(
     league_id: str = Query(default=DEFAULT_LEAGUE_ID),
@@ -4951,6 +5848,122 @@ def admin_dashboard(
     execute_schema()
     with db() as conn:
         return admin_dashboard_payload(conn, normalize_league_id(league_id))
+
+
+@app.post("/api/feedback")
+def submit_feedback(
+    request: Request,
+    payload: FeedbackRequest,
+    x_participant_token: Optional[str] = Header(default=None),
+) -> dict:
+    execute_schema()
+    with db() as conn:
+        participant = get_participant(conn, x_participant_token)
+        league_id = normalize_league_id(participant["league_id"])
+        market_id = payload.market_id
+        market_title = (payload.market_title or "").strip()
+        if market_id:
+            market = conn.execute(
+                """
+                SELECT id, title
+                FROM markets
+                WHERE id = ? AND league_id = ? AND visibility = 'public'
+                """,
+                (market_id, league_id),
+            ).fetchone()
+            if market:
+                market_title = market["title"]
+            else:
+                market_id = None
+        now = now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO feedback_items
+              (league_id, participant_id, category, message, page, market_id, market_title,
+               context_json, user_agent, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+            """,
+            (
+                league_id,
+                participant["id"],
+                payload.category,
+                payload.message.strip(),
+                (payload.page or "").strip(),
+                market_id,
+                market_title[:160],
+                compact_feedback_context(payload.context),
+                request.headers.get("user-agent", "")[:300],
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT f.*, p.display_name
+            FROM feedback_items f
+            LEFT JOIN participants p ON p.id = f.participant_id
+            WHERE f.id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        return {"feedback": feedback_item_payload(row)}
+
+
+@app.get("/api/admin/feedback")
+def admin_feedback(
+    league_id: str = Query(default=DEFAULT_LEAGUE_ID),
+    status: str = Query(default="open"),
+    category: str = Query(default="all"),
+    x_admin_code: Optional[str] = Header(default=None),
+) -> dict:
+    require_admin(x_admin_code)
+    execute_schema()
+    with db() as conn:
+        return feedback_items_payload(conn, league_id, status, category)
+
+
+@app.post("/api/admin/feedback/{feedback_id}/status")
+def admin_update_feedback_status(
+    feedback_id: int,
+    payload: FeedbackStatusRequest,
+    request: Request,
+    x_admin_code: Optional[str] = Header(default=None),
+) -> dict:
+    require_admin(x_admin_code)
+    execute_schema()
+    with db() as conn:
+        row = conn.execute("SELECT * FROM feedback_items WHERE id = ?", (feedback_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+        note = payload.note.strip()
+        conn.execute(
+            """
+            UPDATE feedback_items
+            SET status = ?, admin_note = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (payload.status, note, now_iso(), feedback_id),
+        )
+        updated = conn.execute(
+            """
+            SELECT f.*, p.display_name
+            FROM feedback_items f
+            LEFT JOIN participants p ON p.id = f.participant_id
+            WHERE f.id = ?
+            """,
+            (feedback_id,),
+        ).fetchone()
+        actor = admin_request_actor(request)
+        record_admin_event(
+            conn,
+            "feedback.status",
+            league_id=row["league_id"],
+            actor=actor,
+            entity_type="feedback",
+            entity_id=str(feedback_id),
+            payload={"status": payload.status},
+        )
+        return {"feedback": feedback_item_payload(updated)}
 
 
 @app.get("/api/admin/managers")
@@ -5585,19 +6598,21 @@ def admin_run_scheduled_jobs(
         with db() as conn:
             due = {
                 "lifecycle": True,
-                "pipeline": scheduled_job_due(conn, league_id, "pipeline", 12),
+                "live_scores": scheduled_job_due(conn, league_id, "live_scores", LIVE_SCORE_MARK_INTERVAL_HOURS),
+                "pipeline": SCHEDULE_PIPELINE and scheduled_job_due(conn, league_id, "pipeline", 12),
                 "backup": scheduled_job_due(conn, league_id, "backup", 24),
                 "prune": scheduled_job_due(conn, league_id, "prune", 24),
             }
         operations = {
             "lifecycle": lambda: run_lifecycle_operation("scheduler"),
+            "live_scores": lambda: run_live_score_mark_operation(league_id, actor_type="scheduler"),
             "pipeline": lambda: execute_live_pipeline(league_id),
             "backup": lambda: {"backup": create_database_backup()},
             "prune": lambda: _prune_artifacts_operation(),
         }
         results = {}
         errors = {}
-        for job_type in ("lifecycle", "pipeline", "backup", "prune"):
+        for job_type in ("lifecycle", "live_scores", "pipeline", "backup", "prune"):
             if not due[job_type]:
                 continue
             try:

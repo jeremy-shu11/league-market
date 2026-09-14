@@ -29,7 +29,7 @@ async function inspectMarket(browser, label, viewport) {
     await page.locator("#nav-toggle").click();
   }
   await page.locator("button[data-tab='markets']").click();
-  const playoffMarket = page.locator("#markets-root .asset-row").filter({ hasText: "Makes Playoffs" });
+  const playoffMarket = page.locator("#markets-root .playoff-quote");
   await playoffMarket.first().click();
   await page.locator("#market-detail .binary-outcomes").waitFor({ state: "visible" });
 
@@ -37,7 +37,13 @@ async function inspectMarket(browser, label, viewport) {
     const tiles = [...document.querySelectorAll("#market-detail .binary-outcomes .outcome-row")]
       .map((tile) => {
         const rect = tile.getBoundingClientRect();
-        return { width: Math.round(rect.width), top: Math.round(rect.top), height: Math.round(rect.height) };
+        return {
+          width: Math.round(rect.width),
+          top: Math.round(rect.top),
+          bottom: Math.round(rect.bottom),
+          left: Math.round(rect.left),
+          height: Math.round(rect.height)
+        };
       });
     return {
       viewport: innerWidth,
@@ -66,7 +72,12 @@ async function inspectMarket(browser, label, viewport) {
       if (result.documentWidth !== result.viewport) throw new Error(`${result.label}: horizontal overflow`);
       if (result.tiles.length !== 2) throw new Error(`${result.label}: expected two binary outcomes`);
       if (Math.abs(result.tiles[0].width - result.tiles[1].width) > 1) throw new Error(`${result.label}: unequal tile widths`);
-      if (Math.abs(result.tiles[0].top - result.tiles[1].top) > 1) throw new Error(`${result.label}: outcome tiles are not aligned`);
+      if (result.viewport <= 560) {
+        if (result.tiles[1].top <= result.tiles[0].bottom) throw new Error(`${result.label}: stacked outcome tiles overlap`);
+        if (Math.abs(result.tiles[0].left - result.tiles[1].left) > 1) throw new Error(`${result.label}: stacked outcome tiles are offset`);
+      } else if (Math.abs(result.tiles[0].top - result.tiles[1].top) > 1) {
+        throw new Error(`${result.label}: outcome tiles are not aligned`);
+      }
       if (!result.hasPriceTape) throw new Error(`${result.label}: price tape is missing`);
       if (result.commissionerControls !== 0) throw new Error(`${result.label}: commissioner controls leaked into markets`);
       if (result.marketDetails !== 0) throw new Error(`${result.label}: modeled market details dropdown is still visible`);

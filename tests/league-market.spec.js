@@ -19,13 +19,30 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await page.fill("#invite-code", "theleague");
   await page.click("text=Enter Market");
 
-  await expect(page.locator("text=League Market").first()).toBeVisible();
-  await expect(page.locator("#primary-navigation svg.lucide")).toHaveCount(6);
-  await expect(page.locator("#utility-navigation svg.lucide")).toHaveCount(4);
+  await expect(page.locator("text=The League Market").first()).toBeVisible();
+  await expect(page).toHaveTitle("The League Market");
+  await expect(page.locator("#side-panel .logo-mark svg.lucide-chart-candlestick")).toHaveCount(1);
+  await expect(page.locator("#primary-navigation svg.lucide")).toHaveCount(4);
+  await expect(page.locator("#utility-navigation svg.lucide")).toHaveCount(3);
+  await expect(page.locator(".topbar-actions svg.lucide")).toHaveCount(4);
+  await expect(page.locator("#refresh-button")).toHaveAttribute("title", "Sync market data");
   await expect(page.locator("#onboarding-overlay")).toBeVisible();
   await expect(page.locator("#tour-content")).toContainText("Welcome to the league exchange");
   await page.click("#tour-close");
   await expect(page.locator("#onboarding-overlay")).toBeHidden();
+  await page.hover("#feedback-button");
+  await page.waitForTimeout(150);
+  const feedbackTooltip = await page.locator("#feedback-button").evaluate((button) => {
+    const style = getComputedStyle(button, "::after");
+    return {
+      content: style.content,
+      display: style.display,
+      opacity: style.opacity
+    };
+  });
+  expect(feedbackTooltip.content).toContain("Send feedback");
+  expect(feedbackTooltip.display).not.toBe("none");
+  expect(Number(feedbackTooltip.opacity)).toBeGreaterThan(0);
   await expect(page.locator("#side-panel")).toBeVisible();
   expect(fundRequests).toHaveLength(0);
   await page.click("#nav-toggle");
@@ -79,7 +96,25 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await expect(page.locator("[data-home-widget='tape']")).not.toHaveAttribute("open", "");
   await page.click("button[data-tab='markets']");
   await expect(page.locator("#markets-root .asset-row").first()).toBeVisible();
-  await page.locator("#markets-root .asset-row").filter({ hasText: "Makes Playoffs" }).first().click();
+  const championQuote = page.locator("#markets-root .market-quote").filter({ hasText: "League Champion" }).first();
+  await expect(championQuote.locator(".market-icon-avatar.champion svg.lucide-trophy")).toHaveCount(1);
+  await championQuote.click();
+  await expect(page.locator("#market-detail .outcome-list .player-avatar.team")).toHaveCount(12);
+  const teamAvatarBoxes = await page.locator("#market-detail .outcome-list .player-avatar.team").evaluateAll((avatars) =>
+    avatars.slice(0, 4).map((avatar) => {
+      const rect = avatar.getBoundingClientRect();
+      return { width: Math.round(rect.width), height: Math.round(rect.height) };
+    })
+  );
+  expect(teamAvatarBoxes.every((box) => box.width === 42 && box.height === 42)).toBe(true);
+  await expect(page.locator("#markets-root .playoff-quote").first()).toContainText("to make playoffs");
+  const playoffAvatarBox = await page.locator("#markets-root .playoff-quote .team-market-avatar").first().evaluate((avatar) => {
+    const rect = avatar.getBoundingClientRect();
+    return { width: Math.round(rect.width), height: Math.round(rect.height) };
+  });
+  expect(playoffAvatarBox).toEqual({ width: 38, height: 38 });
+  await expect(page.locator("#markets-root .playoff-quote .side-chip").first()).toContainText(/favored/i);
+  await page.locator("#markets-root .playoff-quote").first().click();
   await expect(page.locator("#market-detail .outcome-list .outcome-token.yes")).toHaveCount(1);
   await expect(page.locator("#market-detail .outcome-list .outcome-token.no")).toHaveCount(1);
   await expect(page.locator("#market-detail .outcome-list")).toHaveClass(/binary-outcomes/);
@@ -128,9 +163,8 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await expect(page.locator("#portfolio-root")).toContainText("sh");
 
   await page.click("button[data-tab='admin']");
-  await page.click("[data-admin-settings-tab='fund']");
-  await expect(page.locator("#fund-starting-balance")).toHaveValue("599");
-  expect(fundRequests.length).toBeGreaterThan(0);
+  await expect(page.locator("[data-admin-settings-tab='fund']")).toHaveCount(0);
+  expect(fundRequests).toHaveLength(0);
 
   await page.click("button[data-tab='markets']");
   await page.locator("#market-detail .admin-actions summary").click();

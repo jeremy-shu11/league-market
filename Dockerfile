@@ -1,3 +1,16 @@
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY nuxt.config.ts ./
+COPY app app
+COPY frontend frontend
+
+RUN npm run generate:nuxt
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,6 +30,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend backend
 COPY frontend frontend
+COPY --from=frontend-build /app/.output/public .output/public
 
 RUN mkdir -p /data
 
