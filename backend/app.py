@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import re
 import secrets
 import sqlite3
 import threading
@@ -181,7 +182,7 @@ async def security_headers(request: Request, call_next):
 
 class JoinRequest(BaseModel):
     invite_code: str
-    display_name: str = Field(min_length=2, max_length=80)
+    display_name: str = Field(default="", max_length=80)
     sleeper_username: Optional[str] = ""
     league_id: str = DEFAULT_LEAGUE_ID
 
@@ -254,8 +255,15 @@ class ParticipantLinkRequest(BaseModel):
 
 class InviteCreateRequest(BaseModel):
     code: Optional[str] = ""
+    display_name: Optional[str] = ""
+    sleeper_user_id: Optional[str] = ""
+    sleeper_username: Optional[str] = ""
     role: str = Field(default="participant", pattern="^(participant|commissioner|admin)$")
     uses_remaining: Optional[int] = Field(default=None, ge=1, le=500)
+    league_id: str = DEFAULT_LEAGUE_ID
+
+
+class ManagerInvitesRequest(BaseModel):
     league_id: str = DEFAULT_LEAGUE_ID
 
 
@@ -312,6 +320,24 @@ def now_iso() -> str:
 
 def normalize_league_id(value: Optional[str]) -> str:
     return (value or DEFAULT_LEAGUE_ID).strip() or DEFAULT_LEAGUE_ID
+
+
+def invite_code_slug(value: Optional[str]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    return slug or secrets.token_urlsafe(5).lower().replace("_", "-")
+
+
+def display_name_from_code(code: str) -> str:
+    words = [part for part in re.split(r"[-_\s]+", code.strip()) if part]
+    return " ".join(part[:1].upper() + part[1:] for part in words) or "League Trader"
+
+
+def invite_is_personal(invite) -> bool:
+    return bool(
+        str(invite["display_name"] or "").strip()
+        or str(invite["sleeper_user_id"] or "").strip()
+        or str(invite["sleeper_username"] or "").strip()
+    )
 
 
 def visible_market_environments() -> tuple[str, ...]:
@@ -554,6 +580,11 @@ def _execute_schema_unchecked() -> None:
                 league_id TEXT NOT NULL DEFAULT '1326428061876371456',
                 role TEXT NOT NULL DEFAULT 'participant',
                 uses_remaining INTEGER,
+                display_name TEXT NOT NULL DEFAULT '',
+                sleeper_user_id TEXT NOT NULL DEFAULT '',
+                sleeper_username TEXT NOT NULL DEFAULT '',
+                participant_id INTEGER,
+                claimed_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS participants (
@@ -904,6 +935,11 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "invite_codes", "league_id", f"TEXT NOT NULL DEFAULT '{DEFAULT_LEAGUE_ID}'")
+    ensure_column(conn, "invite_codes", "display_name", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "invite_codes", "sleeper_user_id", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "invite_codes", "sleeper_username", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "invite_codes", "participant_id", "INTEGER")
+    ensure_column(conn, "invite_codes", "claimed_at", "TEXT")
     ensure_column(conn, "participants", "league_id", f"TEXT NOT NULL DEFAULT '{DEFAULT_LEAGUE_ID}'")
     ensure_column(conn, "participants", "sleeper_user_id", "TEXT")
     ensure_column(conn, "participants", "environment", "TEXT NOT NULL DEFAULT 'production'")
@@ -927,6 +963,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_participants_league ON participants(league_id);
+        CREATE INDEX IF NOT EXISTS idx_invite_codes_league ON invite_codes(league_id);
+        CREATE INDEX IF NOT EXISTS idx_invite_codes_participant ON invite_codes(participant_id);
         CREATE INDEX IF NOT EXISTS idx_markets_league ON markets(league_id);
         CREATE INDEX IF NOT EXISTS idx_fantasy_teams_league ON fantasy_teams(league_id);
         CREATE INDEX IF NOT EXISTS idx_players_league ON players(league_id);
@@ -3559,10 +3597,15 @@ def participant_admin_rows(conn: sqlite3.Connection, league_id: str) -> list[dic
 def invite_rows(conn: sqlite3.Connection, league_id: str) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT code, league_id, role, uses_remaining, created_at
+        SELECT code, league_id, role, uses_remaining, display_name, sleeper_user_id,
+               sleeper_username, participant_id, claimed_at, created_at
         FROM invite_codes
         WHERE league_id = ?
-        ORDER BY created_at DESC, code
+        ORDER BY
+          CASE WHEN participant_id IS NULL THEN 0 ELSE 1 END,
+          display_name COLLATE NOCASE,
+          created_at DESC,
+          code
         """,
         (normalize_league_id(league_id),),
     ).fetchall()
@@ -4724,25 +4767,88 @@ def health() -> dict:
 @app.post("/api/auth/join")
 def join(payload: JoinRequest) -> dict:
     execute_schema()
-    league_id = normalize_league_id(payload.league_id)
+    raw_code = (payload.invite_code or "").strip()
+    requested_code = invite_code_slug(raw_code)
     with db() as conn:
-        invite = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (payload.invite_code,)).fetchone()
+        invite = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (requested_code,)).fetchone()
+        if not invite and raw_code and raw_code != requested_code:
+            invite = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (raw_code,)).fetchone()
         if not invite:
             raise HTTPException(status_code=403, detail="Invalid invite code")
+        invite_code = invite["code"]
+        personal_invite = invite_is_personal(invite)
+        league_id = normalize_league_id(invite["league_id"] if personal_invite else payload.league_id)
+        if personal_invite and invite["participant_id"]:
+            participant = conn.execute("SELECT * FROM participants WHERE id = ?", (invite["participant_id"],)).fetchone()
+            if participant:
+                return {
+                    "token": participant["token"],
+                    "participant": {
+                        "id": participant["id"],
+                        "league_id": participant["league_id"],
+                        "display_name": participant["display_name"],
+                        "role": participant["role"],
+                        "cash": float(participant["cash"]),
+                    },
+                    "returning": True,
+                }
         if invite["uses_remaining"] is not None and invite["uses_remaining"] <= 0:
             raise HTTPException(status_code=403, detail="Invite code has no uses remaining")
+        display_name = (invite["display_name"] or payload.display_name or "").strip()
+        if not display_name:
+            if invite["sleeper_username"]:
+                display_name = str(invite["sleeper_username"]).strip()
+            else:
+                display_name = display_name_from_code(invite_code)
+        if len(display_name) < 2:
+            raise HTTPException(status_code=400, detail="Display name must be at least 2 characters")
+        sleeper_user_id = (invite["sleeper_user_id"] or "").strip()
+        sleeper_username = (invite["sleeper_username"] or payload.sleeper_username or "").strip()
+        if sleeper_user_id:
+            manager = conn.execute(
+                "SELECT * FROM league_managers WHERE league_id = ? AND user_id = ?",
+                (league_id, sleeper_user_id),
+            ).fetchone()
+            if manager:
+                sleeper_username = manager["username"] or sleeper_username
+                display_name = invite["display_name"] or manager["display_name"] or display_name
+            claimed = conn.execute(
+                """
+                SELECT id, display_name, token, role, cash, league_id
+                FROM participants
+                WHERE league_id = ? AND sleeper_user_id = ?
+                """,
+                (league_id, sleeper_user_id),
+            ).fetchone()
+            if claimed:
+                conn.execute(
+                    "UPDATE invite_codes SET participant_id = ?, claimed_at = COALESCE(claimed_at, ?) WHERE code = ?",
+                    (claimed["id"], now_iso(), invite_code),
+                )
+                return {
+                    "token": claimed["token"],
+                    "participant": {
+                        "id": claimed["id"],
+                        "league_id": claimed["league_id"],
+                        "display_name": claimed["display_name"],
+                        "role": claimed["role"],
+                        "cash": float(claimed["cash"]),
+                    },
+                    "returning": True,
+                }
         token = secrets.token_urlsafe(32)
         role = invite["role"]
         cursor = conn.execute(
             """
             INSERT INTO participants
-              (league_id, display_name, sleeper_username, token, role, cash, created_at, environment)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (league_id, display_name, sleeper_username, sleeper_user_id, token, role, cash, created_at, environment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 league_id,
-                payload.display_name.strip(),
-                payload.sleeper_username or "",
+                display_name,
+                sleeper_username,
+                sleeper_user_id or None,
                 token,
                 role,
                 STARTING_BALANCE,
@@ -4751,16 +4857,22 @@ def join(payload: JoinRequest) -> dict:
             ),
         )
         if invite["uses_remaining"] is not None:
-            conn.execute("UPDATE invite_codes SET uses_remaining = uses_remaining - 1 WHERE code = ?", (payload.invite_code,))
+            conn.execute("UPDATE invite_codes SET uses_remaining = uses_remaining - 1 WHERE code = ?", (invite_code,))
+        if personal_invite:
+            conn.execute(
+                "UPDATE invite_codes SET participant_id = ?, claimed_at = COALESCE(claimed_at, ?) WHERE code = ?",
+                (cursor.lastrowid, now_iso(), invite_code),
+            )
         return {
             "token": token,
             "participant": {
                 "id": cursor.lastrowid,
                 "league_id": league_id,
-                "display_name": payload.display_name.strip(),
+                "display_name": display_name,
                 "role": role,
                 "cash": STARTING_BALANCE,
             },
+            "returning": False,
         }
 
 
@@ -6076,19 +6188,97 @@ def admin_create_invite(
 ) -> dict:
     require_admin(x_admin_code)
     execute_schema()
-    code = (payload.code or secrets.token_urlsafe(5)).strip().lower().replace(" ", "-")
-    if len(code) < 3:
-        raise HTTPException(status_code=400, detail="Invite code must be at least 3 characters")
+    display_name = (payload.display_name or "").strip()
+    code = invite_code_slug(payload.code or display_name)
+    if len(code) < 2:
+        raise HTTPException(status_code=400, detail="Invite code must be at least 2 characters")
     league_id = normalize_league_id(payload.league_id)
+    sleeper_user_id = (payload.sleeper_user_id or "").strip()
+    sleeper_username = (payload.sleeper_username or "").strip()
     with db() as conn:
+        if sleeper_user_id:
+            manager = conn.execute(
+                "SELECT * FROM league_managers WHERE league_id = ? AND user_id = ?",
+                (league_id, sleeper_user_id),
+            ).fetchone()
+            if not manager:
+                raise HTTPException(status_code=404, detail="Sleeper manager not found")
+            display_name = display_name or manager["display_name"] or manager["username"] or code
+            sleeper_username = sleeper_username or manager["username"] or ""
+        else:
+            display_name = display_name or display_name_from_code(code)
         try:
             conn.execute(
-                "INSERT INTO invite_codes (code, league_id, role, uses_remaining, created_at) VALUES (?, ?, ?, ?, ?)",
-                (code, league_id, payload.role, payload.uses_remaining, now_iso()),
+                """
+                INSERT INTO invite_codes
+                  (code, league_id, role, uses_remaining, display_name, sleeper_user_id, sleeper_username, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (code, league_id, payload.role, payload.uses_remaining, display_name, sleeper_user_id, sleeper_username, now_iso()),
             )
         except sqlite3.IntegrityError as error:
             raise HTTPException(status_code=409, detail="Invite code already exists") from error
         return {"invite": dict(conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone())}
+
+
+@app.post("/api/admin/invites/manager-codes")
+def admin_create_manager_invites(
+    payload: ManagerInvitesRequest,
+    x_admin_code: Optional[str] = Header(default=None),
+) -> dict:
+    require_admin(x_admin_code)
+    execute_schema()
+    league_id = normalize_league_id(payload.league_id)
+    with db() as conn:
+        managers = stored_managers(conn, league_id)
+        if not managers:
+            snapshot = latest_snapshot(conn, league_id)
+            if snapshot:
+                store_manager_records(conn, manager_records_from_snapshot(snapshot, league_id), now_iso())
+                managers = stored_managers(conn, league_id)
+        if not managers:
+            raise HTTPException(status_code=409, detail="Load Sleeper managers before generating league codes")
+        existing_codes = {
+            str(row["code"])
+            for row in conn.execute("SELECT code FROM invite_codes WHERE league_id = ?", (league_id,)).fetchall()
+        }
+        created = []
+        existing = []
+        for manager in managers:
+            user_id = str(manager.get("user_id") or "")
+            if not user_id:
+                continue
+            already = conn.execute(
+                "SELECT * FROM invite_codes WHERE league_id = ? AND sleeper_user_id = ?",
+                (league_id, user_id),
+            ).fetchone()
+            if already:
+                existing.append(dict(already))
+                continue
+            base = invite_code_slug(manager.get("display_name") or manager.get("username") or manager.get("team_name") or user_id)
+            code = base
+            suffix = 2
+            while code in existing_codes:
+                code = f"{base}-{suffix}"
+                suffix += 1
+            existing_codes.add(code)
+            conn.execute(
+                """
+                INSERT INTO invite_codes
+                  (code, league_id, role, uses_remaining, display_name, sleeper_user_id, sleeper_username, created_at)
+                VALUES (?, ?, 'participant', NULL, ?, ?, ?, ?)
+                """,
+                (
+                    code,
+                    league_id,
+                    manager.get("display_name") or manager.get("username") or display_name_from_code(code),
+                    user_id,
+                    manager.get("username") or "",
+                    now_iso(),
+                ),
+            )
+            created.append(dict(conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone()))
+        return {"league": active_league_meta(conn, league_id), "created": created, "existing": existing}
 
 
 @app.get("/api/admin/resolution-center")
@@ -6522,7 +6712,7 @@ def run_lifecycle_operation(
         ).fetchall()
 
     refreshed_sources = []
-    should_refresh_sources = APP_ENV != "test" if refresh_sources is None else refresh_sources
+    should_refresh_sources = APP_ENV == "production" if refresh_sources is None else refresh_sources
     if resolution_targets and should_refresh_sources:
         try:
             refreshed_sources = fetch_resolution_sources(resolution_targets, checked_at)

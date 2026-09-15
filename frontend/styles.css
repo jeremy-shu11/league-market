@@ -453,6 +453,41 @@ b {
   background-size: 24px 24px;
 }
 
+.join-advanced {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .02);
+}
+
+.join-advanced summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 760;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.join-advanced[open] {
+  padding: 0 12px 12px;
+}
+
+.join-advanced[open] summary {
+  margin: 0 -12px;
+}
+
+.join-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .app-frame {
   min-height: 100vh;
   min-height: 100dvh;
@@ -2604,8 +2639,9 @@ body > div[role="region"] button {
 }
 
 .outcome-token span {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   height: 100%;
   color: var(--muted);
@@ -3740,7 +3776,7 @@ details > summary::-webkit-details-marker {
 
 .invite-form {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 170px 120px auto;
+  grid-template-columns: minmax(130px, 1fr) minmax(150px, 1fr) minmax(170px, 1.1fr) 140px 100px auto;
   gap: 8px;
   padding: 11px;
   margin-bottom: 10px;
@@ -3768,6 +3804,30 @@ details > summary::-webkit-details-marker {
   letter-spacing: .06em;
   text-transform: uppercase;
   background: var(--panel);
+}
+
+.invite-table .mini-table-head,
+.invite-table article {
+  grid-template-columns: minmax(160px, 1.1fr) minmax(100px, .8fr) 86px 112px;
+}
+
+.invite-table article.claimed {
+  background: var(--green-soft);
+}
+
+.invite-table small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-table button {
+  min-height: 40px;
+  justify-self: stretch;
 }
 
 .participant-card {
@@ -4711,6 +4771,7 @@ th {
 .onboarding-overlay {
   z-index: 60;
   place-items: center;
+  pointer-events: auto;
 }
 
 .order-sheet {
@@ -4732,9 +4793,31 @@ th {
 }
 
 .onboarding-card {
+  position: fixed;
+  z-index: 2;
   display: grid;
   gap: 16px;
   padding: 18px;
+}
+
+.tour-spotlight {
+  position: fixed;
+  left: var(--tour-x, 50%);
+  top: var(--tour-y, 50%);
+  width: var(--tour-w, 0px);
+  height: var(--tour-h, 0px);
+  z-index: 1;
+  border: 2px solid var(--green);
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 9999px rgba(0, 0, 0, .58),
+    0 0 0 6px rgba(53, 201, 111, .16);
+  pointer-events: none;
+  transition: left 160ms ease, top 160ms ease, width 160ms ease, height 160ms ease;
+}
+
+.tour-spotlight.hidden {
+  display: none;
 }
 
 .order-card {
@@ -4862,6 +4945,15 @@ th {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.order-summary .outcome-token > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  text-overflow: clip;
 }
 
 .order-review-grid {
@@ -5254,6 +5346,31 @@ th {
     justify-content: space-between;
   }
 
+  .onboarding-overlay {
+    place-items: end stretch;
+    padding: 12px;
+    padding:
+      calc(12px + env(safe-area-inset-top, 0px))
+      max(12px, env(safe-area-inset-right, 0px))
+      calc(12px + env(safe-area-inset-bottom, 0px))
+      max(12px, env(safe-area-inset-left, 0px));
+  }
+
+  .onboarding-card {
+    left: max(12px, env(safe-area-inset-left, 0px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    top: auto;
+    width: auto;
+    max-height: min(54vh, 430px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .onboarding-actions button {
+    min-height: 44px;
+  }
+
   .summary-grid,
   .desk-grid,
   .exchange-hero,
@@ -5423,6 +5540,21 @@ th {
   .mini-table-head,
   .mini-table article {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .invite-table .mini-table-head {
+    display: none;
+  }
+
+  .invite-table article {
+    align-items: start;
+    gap: 7px;
+    padding: 12px;
+  }
+
+  .invite-table button {
+    min-height: 44px;
+    justify-self: stretch;
   }
 
   .admin-access-grid {

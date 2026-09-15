@@ -20,9 +20,10 @@ async function inspectMarket(browser, label, viewport) {
   });
 
   await page.goto(baseURL, { waitUntil: "networkidle" });
-  await page.fill("#display-name", `Production QA ${label} ${Date.now()}`);
   await page.fill("#invite-code", inviteCode);
-  await page.click("text=Enter Market");
+  await page.locator(".join-advanced summary").click();
+  await page.fill("#display-name", `Production QA ${label} ${Date.now()}`);
+  await page.click("#join-submit");
   await page.locator("#tour-close").click();
 
   if (viewport.width <= 980) {

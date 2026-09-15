@@ -252,6 +252,64 @@ class ApiTests(unittest.TestCase):
         }
         return payload, projections
 
+    def test_named_invite_opens_dashboard_and_reuses_participant(self):
+        created = self.client.post(
+            "/api/admin/invites",
+            headers=self.admin_headers(),
+            json={"display_name": "Jeremy Shu", "uses_remaining": 1},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["invite"]["code"], "jeremy-shu")
+
+        first = self.client.post("/api/auth/join", json={"invite_code": "Jeremy Shu"})
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["participant"]["display_name"], "Jeremy Shu")
+        self.assertFalse(first.json()["returning"])
+
+        second = self.client.post("/api/auth/join", json={"invite_code": "jeremy-shu"})
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["token"], first.json()["token"])
+        self.assertTrue(second.json()["returning"])
+
+    def test_join_accepts_existing_raw_invite_codes_with_symbols(self):
+        raw_code = "Legacy/Admin+Code/2026"
+        with market_app.db() as conn:
+            conn.execute(
+                """
+                INSERT INTO invite_codes (code, league_id, role, uses_remaining, display_name, created_at)
+                VALUES (?, ?, 'participant', NULL, 'Legacy Manager', ?)
+                """,
+                (raw_code, "1326428061876371456", market_app.now_iso()),
+            )
+
+        response = self.client.post("/api/auth/join", json={"invite_code": raw_code})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["participant"]["display_name"], "Legacy Manager")
+
+    def test_admin_can_generate_personal_codes_from_sleeper_managers(self):
+        with market_app.db() as conn:
+            conn.execute(
+                """
+                INSERT INTO league_managers
+                  (league_id, user_id, username, display_name, team_name, avatar, is_owner, roster_ids_json, raw_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, '', 1, '[1]', '{}', ?)
+                """,
+                ("1326428061876371456", "sleeper-1", "jshu", "Jeremy Shu", "The Desk", market_app.now_iso()),
+            )
+
+        generated = self.client.post(
+            "/api/admin/invites/manager-codes",
+            headers=self.admin_headers(),
+            json={"league_id": "1326428061876371456"},
+        )
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertEqual(generated.json()["created"][0]["code"], "jeremy-shu")
+        self.assertEqual(generated.json()["created"][0]["sleeper_user_id"], "sleeper-1")
+
+        joined = self.client.post("/api/auth/join", json={"invite_code": "jeremy-shu"})
+        self.assertEqual(joined.status_code, 200, joined.text)
+        self.assertEqual(joined.json()["participant"]["display_name"], "Jeremy Shu")
+
     def test_join_seed_buy_sell_portfolio_and_leaderboard(self):
         token = self.join()
         self.seed()

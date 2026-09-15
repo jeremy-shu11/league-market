@@ -15,9 +15,10 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   const marketTitle = `Playwright Coin Toss ${runId}`;
   const traderName = `Playwright ${runId}`;
 
-  await page.fill("#display-name", traderName);
   await page.fill("#invite-code", "theleague");
-  await page.click("text=Enter Market");
+  await page.locator(".join-advanced summary").click();
+  await page.fill("#display-name", traderName);
+  await page.click("#join-submit");
 
   await expect(page.locator("text=The League Market").first()).toBeVisible();
   await expect(page).toHaveTitle("The League Market");
@@ -27,7 +28,7 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await expect(page.locator(".topbar-actions svg.lucide")).toHaveCount(4);
   await expect(page.locator("#refresh-button")).toHaveAttribute("title", "Sync market data");
   await expect(page.locator("#onboarding-overlay")).toBeVisible();
-  await expect(page.locator("#tour-content")).toContainText("Welcome to the league exchange");
+  await expect(page.locator("#tour-content")).toContainText("Your desk starts here");
   await page.click("#tour-close");
   await expect(page.locator("#onboarding-overlay")).toBeHidden();
   await page.hover("#feedback-button");
@@ -140,6 +141,20 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await expect(page.locator("#order-shares")).toHaveValue("100");
   await expect(page.locator("#order-estimate")).toContainText("Contracts received");
   await expect(page.locator("#order-estimate")).toContainText("Implied probability");
+  const orderOutcomeLabel = await page.locator("#order-estimate .order-summary .outcome-token").evaluate((token) => {
+    const label = token.querySelector("span");
+    const range = document.createRange();
+    range.selectNodeContents(label);
+    const tokenRect = token.getBoundingClientRect();
+    const textRect = range.getBoundingClientRect();
+    range.detach();
+    return {
+      x: Math.abs((tokenRect.left + tokenRect.right - textRect.left - textRect.right) / 2),
+      y: Math.abs((tokenRect.top + tokenRect.bottom - textRect.top - textRect.bottom) / 2)
+    };
+  });
+  expect(orderOutcomeLabel.x).toBeLessThan(1);
+  expect(orderOutcomeLabel.y).toBeLessThan(3);
   await page.click("#order-submit");
   await expect(page.locator("#order-sheet")).toBeVisible();
   await expect(page.locator("#order-submit")).toContainText("Place Buy");

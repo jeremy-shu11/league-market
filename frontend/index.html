@@ -16,26 +16,30 @@
         <div>
           <p class="eyebrow">The League 2026</p>
           <h1>The League Market</h1>
-          <p class="lede">Trade season-long fantasy outcomes with fake credits, clean rules, and receipts.</p>
+          <p class="lede">Open your trading dashboard with the personal league code from the commissioner.</p>
         </div>
         <form id="join-form" class="join-form">
           <label>
-            Display name
-            <input id="display-name" autocomplete="name" required>
+            Your league code
+            <input id="invite-code" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" placeholder="usually your first name" required>
           </label>
-          <label>
-            Invite code
-            <input id="invite-code" autocomplete="one-time-code" required>
-          </label>
-          <label>
-            Sleeper league ID
-            <input id="join-league-id" value="1326428061876371456">
-          </label>
-          <label>
-            Sleeper username
-            <input id="sleeper-username" autocomplete="username">
-          </label>
-          <button id="join-submit" type="submit">Enter Market</button>
+          <details class="join-advanced">
+            <summary>Using a shared code?</summary>
+            <label>
+              Display name
+              <input id="display-name" autocomplete="name" placeholder="Your name on the leaderboard">
+            </label>
+            <label>
+              Sleeper username
+              <input id="sleeper-username" autocomplete="username" placeholder="optional">
+            </label>
+            <label>
+              Sleeper league ID
+              <input id="join-league-id" value="1326428061876371456">
+            </label>
+          </details>
+          <button id="join-submit" type="submit">Open Trading Dashboard</button>
+          <p class="join-hint">Your code keeps your bankroll, trades, and leaderboard record tied to you.</p>
           <p id="join-error" class="error" role="alert" aria-live="assertive"></p>
         </form>
       </section>
@@ -231,11 +235,16 @@
               <section class="admin-settings-panel hidden" data-admin-settings-panel="people">
                 <div class="settings-section-head"><div><h3>People and Access</h3><p>Manage invites, roles, and Sleeper identities.</p></div><button id="refresh-commissioner" type="button">Refresh</button></div>
                 <form id="invite-form" class="invite-form">
-                  <input id="invite-code-new" placeholder="optional invite code">
+                  <input id="invite-code-new" placeholder="league code">
+                  <input id="invite-name-new" placeholder="display name">
+                  <select id="invite-manager"><option value="">Sleeper manager</option></select>
                   <select id="invite-role"><option value="participant">Participant</option><option value="commissioner">Commissioner</option><option value="admin">Admin</option></select>
                   <input id="invite-uses" type="number" min="1" max="500" placeholder="uses">
                   <button type="submit">Create Invite</button>
                 </form>
+                <div class="button-row settings-secondary-actions">
+                  <button id="create-manager-invites" type="button"><i class="button-icon" data-lucide="users-round" aria-hidden="true"></i>Create Codes From Managers</button>
+                </div>
                 <div id="invites-root" class="invites-root"></div>
                 <div class="settings-section-head"><div><h3>Sleeper Managers</h3></div><button id="refresh-managers" type="button">Refresh</button></div>
                 <div id="managers-root" class="manager-directory"></div>
@@ -302,10 +311,11 @@
       </section>
     </main>
     <section id="onboarding-overlay" class="onboarding-overlay hidden" aria-modal="true" role="dialog" aria-labelledby="tour-title">
+      <div id="tour-spotlight" class="tour-spotlight" aria-hidden="true"></div>
       <div class="onboarding-card" tabindex="-1">
         <div class="onboarding-progress">
           <span id="tour-step-count">1 / 5</span>
-          <button id="tour-close" type="button">Close</button>
+          <button id="tour-close" class="icon-button" type="button" aria-label="Close walkthrough" title="Close walkthrough"><i data-lucide="x" aria-hidden="true"></i></button>
         </div>
         <div id="tour-content"></div>
         <div class="onboarding-actions">

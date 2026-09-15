@@ -6,9 +6,10 @@ test("mobile navigation and dialogs remain keyboard accessible", async ({ page }
   await page.evaluate(() => localStorage.clear());
   await page.reload();
 
-  await page.fill("#display-name", `Keyboard QA ${Date.now()}`);
   await page.fill("#invite-code", "theleague");
-  await page.click("text=Enter Market");
+  await page.locator(".join-advanced summary").click();
+  await page.fill("#display-name", `Keyboard QA ${Date.now()}`);
+  await page.click("#join-submit");
 
   await expect(page.locator("#onboarding-overlay")).toBeVisible();
   await expect(page.locator("#onboarding-overlay")).toHaveAttribute("aria-labelledby", "tour-title");
@@ -78,9 +79,10 @@ test("admin all-clear state stays simple on mobile", async ({ page }) => {
   });
 
   await page.goto("/");
-  await page.fill("#display-name", `All Clear QA ${Date.now()}`);
   await page.fill("#invite-code", "theleague");
-  await page.click("text=Enter Market");
+  await page.locator(".join-advanced summary").click();
+  await page.fill("#display-name", `All Clear QA ${Date.now()}`);
+  await page.click("#join-submit");
   await expect(page.locator("#onboarding-overlay")).toBeVisible();
   await page.click("#tour-close");
   await page.click("#nav-toggle");

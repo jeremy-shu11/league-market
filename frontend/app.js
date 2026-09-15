@@ -52,24 +52,46 @@ const state = {
 
 const tourSteps = [
   {
-    title: "Welcome to the league exchange",
-    body: "Everyone gets 10,000 play credits. You are trading probabilities on your fantasy league, not placing real-money bets."
+    tab: "home",
+    target: "#home-root .home-hero",
+    title: "Your desk starts here",
+    body: "This dashboard shows cash, open value, net worth, and live market activity. Everyone starts with 10,000 play credits."
   },
   {
+    tab: "markets",
+    target: "#markets-root",
     title: "Markets are contracts",
-    body: "A market has clear outcomes, a close rule, and a resolution source. Champion and top-scorer markets can have many outcomes; playoff markets are YES or NO."
+    body: "Pick a market, compare the implied odds, then choose an outcome. Playoff markets are YES or NO, while season futures can have many outcomes."
   },
   {
+    tab: "markets",
+    target: "#market-detail",
     title: "Prices are probabilities",
-    body: "A price of 23 means the market implies roughly a 23% chance. If that outcome wins, each share pays 100 credits."
+    body: "A price of 23 means about a 23% chance. Winning shares pay 100 credits, and larger orders move prices more."
   },
   {
-    title: "The market maker fills trades",
-    body: "V1 uses LMSR, so trades execute instantly. Larger orders move the price more because they push against market liquidity."
+    tab: "portfolio",
+    target: "#portfolio-root",
+    title: "Portfolio tracks your receipts",
+    body: "After trading, your positions, ledger, and net worth update here. This is where you see whether your edge is working."
   },
   {
-    title: "Your edge becomes receipts",
-    body: "The portfolio and leaderboard track cash, open value, and profit as market prices move."
+    tab: "leaderboard",
+    target: "#leaderboard-root",
+    title: "The league can see the standings",
+    body: "Leaderboard ranks cash plus open position value, so trading well shows up before markets settle."
+  },
+  {
+    tab: "account",
+    target: "#account-tab",
+    title: "Claim your Sleeper identity",
+    body: "If your personal code was generated from Sleeper, this may already be linked. Otherwise use Account to claim the right team."
+  },
+  {
+    tab: "home",
+    target: ".topbar-actions",
+    title: "Send feedback from anywhere",
+    body: "Use the feedback button when odds, settlement, or a screen feels wrong. It attaches page context for the commissioner."
   }
 ];
 
@@ -271,26 +293,47 @@ async function join(event) {
   event.preventDefault();
   $("#join-error").textContent = "";
   const submit = $("#join-submit");
-  setButtonBusy(submit, true, "Opening Market...");
+  setButtonBusy(submit, true, "Opening Dashboard...");
   try {
     const payload = await api("/api/auth/join", {
       method: "POST",
       body: JSON.stringify({
-        display_name: $("#display-name").value,
+        display_name: $("#display-name").value.trim(),
         invite_code: $("#invite-code").value,
         league_id: $("#join-league-id").value,
-        sleeper_username: $("#sleeper-username").value
+        sleeper_username: $("#sleeper-username").value.trim()
       })
     });
     state.token = payload.token;
     localStorage.setItem("leagueMarketToken", state.token);
-    notify(`Welcome, ${payload.participant.display_name}. Your 10,000 credit bankroll is live.`, "success");
-    localStorage.removeItem("leagueMarketTourSeen");
+    const returning = payload.returning ? "Welcome back" : "Welcome";
+    notify(`${returning}, ${payload.participant.display_name}. Your trading dashboard is live.`, "success");
+    if (!payload.returning) localStorage.removeItem("leagueMarketTourSeen");
     await boot();
   } catch (error) {
     $("#join-error").textContent = error.message;
+    if (/display name/i.test(error.message)) {
+      $("#join-form .join-advanced")?.setAttribute("open", "");
+      $("#display-name").focus();
+    }
   } finally {
     setButtonBusy(submit, false);
+  }
+}
+
+function applyJoinParams() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code") || params.get("invite") || "";
+  const name = params.get("name") || "";
+  const league = params.get("league") || "";
+  if (code && $("#invite-code")) {
+    $("#invite-code").value = code;
+    $("#join-submit").focus();
+  }
+  if (name && $("#display-name")) $("#display-name").value = name;
+  if (league && $("#join-league-id")) {
+    $("#join-league-id").value = league;
+    $("#join-league-id").dataset.touched = "true";
   }
 }
 
@@ -500,29 +543,94 @@ function trapDialogFocus(event, dialog) {
 
 function showTour(step = 0) {
   state.tourStep = Math.max(0, Math.min(step, tourSteps.length - 1));
+  prepareTourStep();
   renderTour();
   openDialog($("#onboarding-overlay"), "#tour-close");
+  window.requestAnimationFrame(positionTourOverlay);
 }
 
 function closeTour() {
   closeDialog($("#onboarding-overlay"));
   localStorage.setItem("leagueMarketTourSeen", "true");
+  $("#tour-spotlight")?.removeAttribute("style");
+  $(".onboarding-card")?.removeAttribute("style");
+}
+
+function prepareTourStep() {
+  const step = tourSteps[state.tourStep] || tourSteps[0];
+  if (step?.tab && state.activeTab !== step.tab) activateTab(step.tab);
+  if (isMobileNavigation() && state.mobileNavOpen) {
+    state.mobileNavOpen = false;
+    $("#app-view")?.classList.remove("mobile-nav-open");
+    $("#nav-toggle")?.setAttribute("aria-expanded", "false");
+    $("#nav-toggle")?.setAttribute("aria-label", "Open navigation menu");
+  }
+}
+
+function positionTourOverlay() {
+  const step = tourSteps[state.tourStep] || tourSteps[0];
+  const target = step.target ? document.querySelector(step.target) : null;
+  const spotlight = $("#tour-spotlight");
+  const card = $(".onboarding-card");
+  if (!spotlight || !card) return;
+  const mobile = window.matchMedia("(max-width: 760px)").matches;
+  if (!target || target.classList.contains("hidden")) {
+    spotlight.classList.add("hidden");
+    card.removeAttribute("style");
+    return;
+  }
+  let rect = target.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) {
+    const fallback = document.querySelector(`#${state.activeTab}-tab:not(.hidden)`) || $("#main-content");
+    if (fallback && fallback !== target) rect = fallback.getBoundingClientRect();
+  }
+  if (rect.width < 4 || rect.height < 4) {
+    spotlight.classList.add("hidden");
+    card.removeAttribute("style");
+    return;
+  }
+  const pad = mobile ? 6 : 10;
+  spotlight.classList.remove("hidden");
+  spotlight.style.setProperty("--tour-x", `${Math.max(8, rect.left - pad)}px`);
+  spotlight.style.setProperty("--tour-y", `${Math.max(8, rect.top - pad)}px`);
+  spotlight.style.setProperty("--tour-w", `${Math.min(window.innerWidth - 16, rect.width + pad * 2)}px`);
+  spotlight.style.setProperty("--tour-h", `${Math.min(window.innerHeight - 16, rect.height + pad * 2)}px`);
+  if (mobile) {
+    card.removeAttribute("style");
+    return;
+  }
+  const cardWidth = Math.min(430, window.innerWidth - 36);
+  const targetCenter = rect.left + rect.width / 2;
+  const left = targetCenter > window.innerWidth / 2
+    ? Math.max(18, rect.left - cardWidth - 18)
+    : Math.min(window.innerWidth - cardWidth - 18, rect.right + 18);
+  const estimatedHeight = Math.min(360, card.offsetHeight || 320);
+  const top = Math.min(Math.max(18, rect.top + rect.height / 2 - estimatedHeight / 2), window.innerHeight - estimatedHeight - 18);
+  card.style.width = `${cardWidth}px`;
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
+  card.style.right = "auto";
+  card.style.bottom = "auto";
+}
+
+function moveTour(delta) {
+  state.tourStep = Math.max(0, Math.min(state.tourStep + delta, tourSteps.length - 1));
+  prepareTourStep();
+  renderTour();
+  window.requestAnimationFrame(positionTourOverlay);
 }
 
 function renderTour() {
   const step = tourSteps[state.tourStep];
   $("#tour-step-count").textContent = `${state.tourStep + 1} / ${tourSteps.length}`;
   $("#tour-content").innerHTML = `
-    <p class="eyebrow">Gameplay walkthrough</p>
+    <p class="eyebrow">Guided walkthrough</p>
     <h2 id="tour-title">${escapeHtml(step.title)}</h2>
     <p>${escapeHtml(step.body)}</p>
-    <div class="tour-demo">
-      <span class="demo-price">${state.tourStep === 2 ? "23" : state.tourStep === 3 ? "+7 pts" : "100"}</span>
-      <span>${state.tourStep === 2 ? "implied probability" : state.tourStep === 3 ? "price movement" : "credit payout"}</span>
-    </div>
   `;
   $("#tour-prev").disabled = state.tourStep === 0;
   $("#tour-next").textContent = state.tourStep === tourSteps.length - 1 ? "Start Trading" : "Next";
+  hydrateIcons();
 }
 
 function render() {
@@ -1906,19 +2014,34 @@ async function loadCommissionerManagement() {
 function renderCommissionerManagement() {
   const participantsRoot = $("#participants-root");
   const invitesRoot = $("#invites-root");
+  const inviteManager = $("#invite-manager");
+  if (inviteManager) {
+    inviteManager.innerHTML = `<option value="">Sleeper manager</option>${state.managers.map((manager) => `<option value="${escapeHtml(manager.user_id)}">${escapeHtml(manager.display_name || manager.username)}${manager.team_name ? ` · ${escapeHtml(manager.team_name)}` : ""}</option>`).join("")}`;
+  }
   if (invitesRoot) {
     invitesRoot.innerHTML = `
-      <div class="mini-table">
-        <div class="mini-table-head"><span>Invite</span><span>Role</span><span>Uses</span></div>
+      <div class="mini-table invite-table">
+        <div class="mini-table-head"><span>Leaguemate</span><span>Code</span><span>Status</span><span>Share</span></div>
         ${state.invites.map((invite) => `
-          <article>
-            <strong>${escapeHtml(invite.code)}</strong>
-            <span>${escapeHtml(invite.role)}</span>
-            <span>${invite.uses_remaining ?? "∞"}</span>
+          <article class="${invite.participant_id ? "claimed" : ""}">
+            <div>
+              <strong>${escapeHtml(invite.display_name || invite.code)}</strong>
+              <small>${invite.sleeper_username ? `@${escapeHtml(invite.sleeper_username)}` : escapeHtml(invite.role)}</small>
+            </div>
+            <span>${escapeHtml(invite.code)}</span>
+            <span>${invite.participant_id ? "Joined" : invite.uses_remaining == null ? "Ready" : `${invite.uses_remaining} uses`}</span>
+            <button type="button" data-copy-invite="${escapeHtml(invite.code)}">Copy Link</button>
           </article>
         `).join("") || `<p class="empty">No invite codes yet.</p>`}
       </div>
     `;
+    invitesRoot.querySelectorAll("[data-copy-invite]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const url = inviteShareUrl(button.dataset.copyInvite);
+        await copyText(url);
+        notify("Invite link copied", "success");
+      });
+    });
   }
   if (!participantsRoot) return;
   const managerOptions = [
@@ -1953,6 +2076,28 @@ function renderCommissionerManagement() {
     select.addEventListener("change", () => linkParticipant(select.dataset.linkParticipant, select.value));
   });
   renderLaunchChecklist();
+}
+
+function inviteShareUrl(code) {
+  const url = new URL(window.location.origin + window.location.pathname);
+  url.searchParams.set("code", code);
+  return url.toString();
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("input");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
 }
 
 async function setParticipantRole(participantId, role) {
@@ -3243,16 +3388,14 @@ function wireEvents() {
   });
   $("#tour-close").addEventListener("click", closeTour);
   $("#tour-prev").addEventListener("click", () => {
-    state.tourStep -= 1;
-    renderTour();
+    moveTour(-1);
   });
   $("#tour-next").addEventListener("click", () => {
     if (state.tourStep === tourSteps.length - 1) {
       closeTour();
       return;
     }
-    state.tourStep += 1;
-    renderTour();
+    moveTour(1);
   });
   $("#onboarding-overlay").addEventListener("click", (event) => {
     if (event.target.id === "onboarding-overlay") closeTour();
@@ -3296,6 +3439,7 @@ function wireEvents() {
       state.mobileNavOpen = false;
       $("#app-view").classList.remove("mobile-nav-open");
     }
+    if (!$("#onboarding-overlay")?.classList.contains("hidden")) positionTourOverlay();
   });
   $("#market-filter").addEventListener("change", renderMarkets);
   $("#market-group-filter").addEventListener("change", renderMarkets);
@@ -3484,15 +3628,25 @@ function wireEvents() {
       notify(error.message, "warn");
     }
   });
+  $("#invite-manager").addEventListener("change", (event) => {
+    const manager = state.managers.find((item) => String(item.user_id) === String(event.currentTarget.value));
+    if (!manager) return;
+    if (!$("#invite-name-new").value) $("#invite-name-new").value = manager.display_name || manager.username || "";
+    if (!$("#invite-code-new").value) $("#invite-code-new").value = String(manager.display_name || manager.username || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  });
   $("#invite-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const usesValue = $("#invite-uses").value;
+      const manager = state.managers.find((item) => String(item.user_id) === String($("#invite-manager").value));
       await api("/api/admin/invites", {
         method: "POST",
         headers: { "X-Admin-Code": $("#admin-code").value },
         body: JSON.stringify({
           code: $("#invite-code-new").value,
+          display_name: $("#invite-name-new").value,
+          sleeper_user_id: manager?.user_id || "",
+          sleeper_username: manager?.username || "",
           role: $("#invite-role").value,
           uses_remaining: usesValue ? Number(usesValue) : null,
           league_id: $("#league-id-input").value.trim()
@@ -3505,6 +3659,23 @@ function wireEvents() {
       $("#admin-status").textContent = error.message;
       notify(error.message, "warn");
     }
+  });
+  $("#create-manager-invites").addEventListener("click", async (event) => {
+    await withAdminButton(event.currentTarget, "Creating Codes...", async () => {
+      try {
+        const result = await api("/api/admin/invites/manager-codes", {
+          method: "POST",
+          headers: { "X-Admin-Code": $("#admin-code").value },
+          body: JSON.stringify({ league_id: $("#league-id-input").value.trim() })
+        });
+        $("#admin-status").textContent = `${result.created.length} new codes · ${result.existing.length} already existed`;
+        notify("League sign-in codes are ready to share", "success");
+        await loadCommissionerManagement();
+      } catch (error) {
+        $("#admin-status").textContent = error.message;
+        notify(error.message, "warn");
+      }
+    });
   });
   $("#seed-markets").addEventListener("click", async () => {
     try {
@@ -3570,5 +3741,6 @@ function wireEvents() {
 }
 
 applyTheme();
+applyJoinParams();
 wireEvents();
 boot();
