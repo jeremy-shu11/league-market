@@ -310,6 +310,49 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(joined.status_code, 200, joined.text)
         self.assertEqual(joined.json()["participant"]["display_name"], "Jeremy Shu")
 
+    def test_participant_can_change_personal_league_code(self):
+        created = self.client.post(
+            "/api/admin/invites",
+            headers=self.admin_headers(),
+            json={"display_name": "Jeremy Shu", "uses_remaining": 1},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        joined = self.client.post("/api/auth/join", json={"invite_code": "jeremy-shu"})
+        self.assertEqual(joined.status_code, 200, joined.text)
+        token = joined.json()["token"]
+
+        updated = self.client.post(
+            "/api/account/code",
+            headers={"X-Participant-Token": token},
+            json={"code": "J Shu"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["participant"]["invite_code"], "j-shu")
+
+        old_code = self.client.post("/api/auth/join", json={"invite_code": "jeremy-shu"})
+        self.assertEqual(old_code.status_code, 403, old_code.text)
+        new_code = self.client.post("/api/auth/join", json={"invite_code": "j-shu"})
+        self.assertEqual(new_code.status_code, 200, new_code.text)
+        self.assertEqual(new_code.json()["token"], token)
+        self.assertTrue(new_code.json()["returning"])
+
+    def test_participant_code_change_rejects_code_used_by_another_account(self):
+        first = self.join("First Trader")
+        second = self.join("Second Trader")
+        first_update = self.client.post(
+            "/api/account/code",
+            headers={"X-Participant-Token": first},
+            json={"code": "first"},
+        )
+        self.assertEqual(first_update.status_code, 200, first_update.text)
+
+        second_update = self.client.post(
+            "/api/account/code",
+            headers={"X-Participant-Token": second},
+            json={"code": "first"},
+        )
+        self.assertEqual(second_update.status_code, 409, second_update.text)
+
     def test_join_seed_buy_sell_portfolio_and_leaderboard(self):
         token = self.join()
         self.seed()

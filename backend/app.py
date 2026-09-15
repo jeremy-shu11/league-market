@@ -245,6 +245,10 @@ class ClaimIdentityRequest(BaseModel):
     user_id: str
 
 
+class AccountCodeRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=80)
+
+
 class ParticipantRoleRequest(BaseModel):
     role: str = Field(pattern="^(participant|commissioner|admin)$")
 
@@ -3612,6 +3616,26 @@ def invite_rows(conn: sqlite3.Connection, league_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def participant_invite_code(conn: sqlite3.Connection, participant_id: int) -> str:
+    row = conn.execute(
+        """
+        SELECT code
+        FROM invite_codes
+        WHERE participant_id = ?
+        ORDER BY claimed_at DESC, created_at DESC, code
+        LIMIT 1
+        """,
+        (participant_id,),
+    ).fetchone()
+    return str(row["code"]) if row else ""
+
+
+def participant_payload(conn: sqlite3.Connection, participant: dict) -> dict:
+    item = dict(participant)
+    item["invite_code"] = participant_invite_code(conn, int(item["id"]))
+    return item
+
+
 def default_fund_settings(league_id: str) -> dict:
     return {
         "league_id": normalize_league_id(league_id),
@@ -4787,6 +4811,7 @@ def join(payload: JoinRequest) -> dict:
                         "id": participant["id"],
                         "league_id": participant["league_id"],
                         "display_name": participant["display_name"],
+                        "invite_code": invite_code,
                         "role": participant["role"],
                         "cash": float(participant["cash"]),
                     },
@@ -4831,6 +4856,7 @@ def join(payload: JoinRequest) -> dict:
                         "id": claimed["id"],
                         "league_id": claimed["league_id"],
                         "display_name": claimed["display_name"],
+                        "invite_code": invite_code,
                         "role": claimed["role"],
                         "cash": float(claimed["cash"]),
                     },
@@ -4869,6 +4895,7 @@ def join(payload: JoinRequest) -> dict:
                 "id": cursor.lastrowid,
                 "league_id": league_id,
                 "display_name": display_name,
+                "invite_code": invite_code if personal_invite else "",
                 "role": role,
                 "cash": STARTING_BALANCE,
             },
@@ -4883,12 +4910,96 @@ def session(x_participant_token: Optional[str] = Header(default=None)) -> dict:
         participant = get_participant(conn, x_participant_token)
         cash, open_value = cash_and_open_value(conn, participant)
         return {
-            "participant": participant,
+            "participant": participant_payload(conn, participant),
             "cash": cash,
             "open_value": round(open_value, 2),
             "net_worth": round(cash + open_value, 2),
             "league": active_league_meta(conn, participant.get("league_id")),
         }
+
+
+@app.post("/api/account/code")
+def update_account_code(payload: AccountCodeRequest, x_participant_token: Optional[str] = Header(default=None)) -> dict:
+    execute_schema()
+    code = invite_code_slug(payload.code)
+    if len(code) < 2:
+        raise HTTPException(status_code=400, detail="League code must include at least 2 letters or numbers")
+    if len(code) > 80:
+        raise HTTPException(status_code=400, detail="League code must be 80 characters or fewer")
+    with db() as conn:
+        begin_immediate(conn)
+        participant = get_participant(conn, x_participant_token)
+        participant_id = int(participant["id"])
+        league_id = normalize_league_id(participant.get("league_id"))
+        existing = conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone()
+        if existing and (
+            existing["participant_id"] is None or int(existing["participant_id"]) != participant_id
+        ):
+            raise HTTPException(status_code=409, detail="League code is already in use")
+
+        owned = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM invite_codes
+                WHERE participant_id = ?
+                ORDER BY claimed_at DESC, created_at DESC, code
+                """,
+                (participant_id,),
+            ).fetchall()
+        ]
+        current = next((row for row in owned if row["code"] == code), None) or (owned[0] if owned else None)
+        display_name = str(participant.get("display_name") or "").strip() or display_name_from_code(code)
+        sleeper_user_id = str(participant.get("sleeper_user_id") or "").strip()
+        sleeper_username = str(participant.get("sleeper_username") or "").strip()
+        role = str(participant.get("role") or "participant")
+        timestamp = now_iso()
+        if current:
+            conn.execute(
+                """
+                UPDATE invite_codes
+                SET code = ?, league_id = ?, role = ?, uses_remaining = NULL,
+                    display_name = ?, sleeper_user_id = ?, sleeper_username = ?,
+                    participant_id = ?, claimed_at = COALESCE(claimed_at, ?)
+                WHERE code = ?
+                """,
+                (
+                    code,
+                    league_id,
+                    role,
+                    display_name,
+                    sleeper_user_id,
+                    sleeper_username,
+                    participant_id,
+                    timestamp,
+                    current["code"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO invite_codes
+                  (code, league_id, role, uses_remaining, display_name, sleeper_user_id,
+                   sleeper_username, participant_id, claimed_at, created_at)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    code,
+                    league_id,
+                    role,
+                    display_name,
+                    sleeper_user_id,
+                    sleeper_username,
+                    participant_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        conn.execute("DELETE FROM invite_codes WHERE participant_id = ? AND code != ?", (participant_id, code))
+        updated = get_participant(conn, str(participant["token"]))
+        invite = dict(conn.execute("SELECT * FROM invite_codes WHERE code = ?", (code,)).fetchone())
+        return {"participant": participant_payload(conn, updated), "invite": invite}
 
 
 @app.get("/api/identity/options")

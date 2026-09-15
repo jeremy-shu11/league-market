@@ -673,6 +673,7 @@ function render() {
   renderPortfolio();
   renderLeaderboard();
   renderManagers();
+  renderAccountCode();
   renderIdentity();
   renderCommissionerManagement();
   renderLaunchChecklist();
@@ -1916,6 +1917,62 @@ async function claimIdentity(userId) {
   } catch (error) {
     notify(error.message, "warn");
   }
+}
+
+function suggestedAccountCode() {
+  const value = state.session?.participant?.display_name || "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function renderAccountCode() {
+  const input = $("#account-code-input");
+  const copyButton = $("#account-code-copy");
+  if (!input || !copyButton) return;
+  const code = state.session?.participant?.invite_code || "";
+  if (!input.dataset.touched) {
+    input.value = code || suggestedAccountCode();
+  }
+  copyButton.disabled = !code;
+}
+
+async function saveAccountCode(event) {
+  event.preventDefault();
+  const input = $("#account-code-input");
+  const status = $("#account-code-status");
+  const button = $("#account-code-save");
+  status.textContent = "";
+  setButtonBusy(button, true, "Saving...");
+  try {
+    const result = await api("/api/account/code", {
+      method: "POST",
+      body: JSON.stringify({ code: input.value })
+    });
+    state.session.participant = result.participant;
+    delete input.dataset.touched;
+    input.value = result.participant.invite_code || "";
+    status.textContent = "Saved";
+    notify("League code saved", "success");
+    renderAccountCode();
+  } catch (error) {
+    status.textContent = error.message;
+    notify(error.message, "warn");
+  } finally {
+    setButtonBusy(button, false);
+  }
+}
+
+async function copyAccountCodeLink() {
+  const code = state.session?.participant?.invite_code || $("#account-code-input")?.value?.trim() || "";
+  if (!code) {
+    notify("Save a league code first", "warn");
+    return;
+  }
+  await copyText(inviteShareUrl(code));
+  notify("League link copied", "success");
 }
 
 function renderSetupResult(result) {
@@ -3449,6 +3506,11 @@ function wireEvents() {
   $("#join-league-id").addEventListener("input", () => {
     $("#join-league-id").dataset.touched = "true";
   });
+  $("#account-code-form")?.addEventListener("submit", saveAccountCode);
+  $("#account-code-input")?.addEventListener("input", (event) => {
+    event.currentTarget.dataset.touched = "true";
+  });
+  $("#account-code-copy")?.addEventListener("click", copyAccountCodeLink);
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       activateTab(button.dataset.tab);

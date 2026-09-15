@@ -164,6 +164,11 @@ test("join, seed, trade, resolve, and view leaderboard", async ({ page }) => {
   await expect(page.locator("#ticker-track")).toContainText("BUY");
 
   await page.click("button[data-tab='account']");
+  const accountCode = `playwright-${runId}`;
+  await page.fill("#account-code-input", accountCode);
+  await page.click("#account-code-save");
+  await expect(page.locator("#account-code-status")).toContainText("Saved");
+  await expect(page.locator("#account-code-input")).toHaveValue(accountCode);
   await page.click("#refresh-identity");
   await expect(page.locator("#identity-root .identity-card").first()).toBeVisible();
   await expect(page.locator("#identity-root")).toContainText("Current claim");

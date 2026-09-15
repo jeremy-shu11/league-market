@@ -162,6 +162,19 @@
           <div class="account-grid">
             <section class="account-panel">
               <div class="section-head">
+                <h2>Your League Code</h2>
+              </div>
+              <form id="account-code-form" class="account-code-card">
+                <label>League code <input id="account-code-input" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" placeholder="your first name" required></label>
+                <div class="account-code-actions">
+                  <button id="account-code-save" class="primary-command" type="submit">Save Code</button>
+                  <button id="account-code-copy" type="button">Copy Link</button>
+                </div>
+                <p id="account-code-status" class="account-code-status" role="status" aria-live="polite"></p>
+              </form>
+            </section>
+            <section class="account-panel">
+              <div class="section-head">
                 <h2>Claim Sleeper Identity</h2>
               </div>
               <div class="safety-note">

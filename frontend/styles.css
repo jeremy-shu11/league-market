@@ -3528,6 +3528,7 @@ details > summary::-webkit-details-marker {
 .league-preview-grid,
 .manager-list article,
 .mini-table,
+.account-code-card,
 .identity-card,
 .participant-card,
 .invite-form,
@@ -3755,6 +3756,30 @@ details > summary::-webkit-details-marker {
 
 .identity-current strong {
   font-size: 20px;
+}
+
+.account-code-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 12px;
+}
+
+.account-code-card label {
+  min-width: 0;
+}
+
+.account-code-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.account-code-status {
+  grid-column: 1 / -1;
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .identity-card {
@@ -5217,6 +5242,7 @@ th {
   }
 
   .app-status button,
+  .account-code-actions button,
   .dashboard-segmented button,
   .empty-state button,
   .error-state button,
@@ -5311,10 +5337,16 @@ th {
   .fund-settings-grid.compact,
   .fund-entry-form,
   .admin-command-grid,
+  .account-code-card,
   .invite-form,
   .participant-card,
   .identity-card {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-code-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .launch-steps {
