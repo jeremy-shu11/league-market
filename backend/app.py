@@ -102,6 +102,7 @@ MODEL_SIMULATIONS = int(os.environ.get("LEAGUE_MARKET_SIMULATIONS", "20000"))
 LIVE_SCORE_SIMULATIONS = int(os.environ.get("LEAGUE_MARKET_LIVE_SCORE_SIMULATIONS", "5000"))
 LIVE_SCORE_MARK_INTERVAL_HOURS = float(os.environ.get("LEAGUE_MARKET_LIVE_SCORE_INTERVAL_HOURS", "0.08"))
 AUTOMATION_DASHBOARD_GRACE_HOURS = float(os.environ.get("LEAGUE_MARKET_AUTOMATION_DASHBOARD_GRACE_HOURS", "1"))
+AUTOMATION_RUNNING_TIMEOUT_HOURS = float(os.environ.get("LEAGUE_MARKET_AUTOMATION_RUNNING_TIMEOUT_HOURS", "0.25"))
 SCHEDULE_PIPELINE = env_flag("LEAGUE_MARKET_SCHEDULE_PIPELINE", True)
 ADMIN_SESSION_COOKIE = "league_market_admin"
 ADMIN_SESSION_HOURS = 8
@@ -4591,24 +4592,28 @@ def admin_dashboard_payload(conn: sqlite3.Connection, league_id: str) -> dict:
         "pipeline": {
             "interval_hours": 12.0 if SCHEDULE_PIPELINE else 24.0,
             "health_hours": 24.0,
+            "running_hours": AUTOMATION_RUNNING_TIMEOUT_HOURS,
             "label": "Data pipeline",
             "severity": "blocked",
         },
         "live_scores": {
             "interval_hours": LIVE_SCORE_MARK_INTERVAL_HOURS,
             "health_hours": max(LIVE_SCORE_MARK_INTERVAL_HOURS, AUTOMATION_DASHBOARD_GRACE_HOURS),
+            "running_hours": AUTOMATION_RUNNING_TIMEOUT_HOURS,
             "label": "Live scoring marks",
             "severity": "attention",
         },
         "lifecycle": {
             "interval_hours": 0.25,
             "health_hours": max(0.25, AUTOMATION_DASHBOARD_GRACE_HOURS),
+            "running_hours": AUTOMATION_RUNNING_TIMEOUT_HOURS,
             "label": "Market lifecycle",
             "severity": "attention",
         },
         "backup": {
             "interval_hours": 24.0,
             "health_hours": 24.0,
+            "running_hours": AUTOMATION_RUNNING_TIMEOUT_HOURS,
             "label": "Database backup",
             "severity": "attention",
         },
@@ -4649,9 +4654,19 @@ def admin_dashboard_payload(conn: sqlite3.Connection, league_id: str) -> dict:
         last_success_at = (successful or {}).get("completed_at") or fallback_at
         success_time = parsed(last_success_at)
         age_hours = (now - success_time).total_seconds() / 3600 if success_time else None
+        started_time = parsed((latest or {}).get("started_at"))
+        running_age_hours = (now - started_time).total_seconds() / 3600 if started_time else None
         state = "healthy"
+        state_reason = ""
         if latest and latest["status"] == "running":
-            state = "running"
+            if running_age_hours is not None and running_age_hours > config["running_hours"]:
+                state = "failed"
+                state_reason = (
+                    f"The latest attempt has been running for {running_age_hours:.1f} hours "
+                    "and may have been interrupted."
+                )
+            else:
+                state = "running"
         elif latest and latest["status"] == "failed" and (not success_time or parsed(latest["started_at"]) > success_time):
             state = "failed"
         elif age_hours is None:
@@ -4667,11 +4682,11 @@ def admin_dashboard_payload(conn: sqlite3.Connection, league_id: str) -> dict:
             "next_due_at": (
                 (success_time + timedelta(hours=config["interval_hours"])).isoformat() if success_time else None
             ),
-            "error": (latest or {}).get("error") or "",
+            "error": state_reason or (latest or {}).get("error") or "",
         }
         if state in {"failed", "stale"} or (state == "unknown" and job_type != "lifecycle"):
             reason = (
-                (latest or {}).get("error")
+                state_reason or (latest or {}).get("error")
                 if state == "failed"
                 else f"No successful run has been recorded in the last {config['health_hours']:g} hours."
             )

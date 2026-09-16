@@ -1105,6 +1105,51 @@ class ApiTests(unittest.TestCase):
         job_titles = {action["title"] for action in dashboard["actions"] if action["type"] == "job_retry"}
         self.assertNotIn("Data pipeline needs attention", job_titles)
 
+    def test_admin_dashboard_flags_stuck_running_pipeline(self):
+        self.seed()
+        old_model_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        stale_success = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        stale_started = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=market_app.AUTOMATION_RUNNING_TIMEOUT_HOURS, minutes=1)
+        ).isoformat()
+        fresh_success = datetime.now(timezone.utc).isoformat()
+        with market_app.db() as conn:
+            conn.execute("UPDATE model_runs SET created_at = ?", (old_model_time,))
+            conn.execute("UPDATE ingestion_runs SET fetched_at = ? WHERE dataset = 'weekly_projections'", (old_model_time,))
+            conn.execute(
+                """
+                INSERT INTO job_runs
+                  (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                VALUES (?, 'pipeline', 'succeeded', 'scheduler', ?, ?, '{}')
+                """,
+                ("1326428061876371456", stale_success, stale_success),
+            )
+            conn.execute(
+                """
+                INSERT INTO job_runs
+                  (league_id, job_type, status, triggered_by, started_at, result_json)
+                VALUES (?, 'pipeline', 'running', 'commissioner', ?, '{}')
+                """,
+                ("1326428061876371456", stale_started),
+            )
+            for job_type in ("live_scores", "lifecycle", "backup"):
+                conn.execute(
+                    """
+                    INSERT INTO job_runs
+                      (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                    VALUES (?, ?, 'succeeded', 'scheduler', ?, ?, '{}')
+                    """,
+                    ("1326428061876371456", job_type, fresh_success, fresh_success),
+                )
+            dashboard = market_app.admin_dashboard_payload(conn, "1326428061876371456")
+
+        self.assertEqual(dashboard["automation"]["pipeline"]["state"], "failed")
+        self.assertIn("interrupted", dashboard["automation"]["pipeline"]["error"])
+        pipeline_action = next(action for action in dashboard["actions"] if action["id"] == "job:pipeline")
+        self.assertEqual(pipeline_action["title"], "Data pipeline needs attention")
+        self.assertIn("interrupted", pipeline_action["detail"])
+
     def test_scheduled_endpoint_runs_lifecycle_and_skips_fresh_daily_jobs(self):
         self.seed()
         with market_app.db() as conn:
