@@ -1047,6 +1047,64 @@ class ApiTests(unittest.TestCase):
         after = self.client.get("/api/admin/dashboard?league_id=1326428061876371456").json()
         self.assertFalse(any(action["id"] == resolution["id"] for action in after["actions"]))
 
+    def test_admin_dashboard_allows_grace_for_scheduler_interval_jitter(self):
+        self.seed()
+        completed_at = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+        with market_app.db() as conn:
+            for job_type in ("live_scores", "lifecycle", "backup"):
+                conn.execute(
+                    """
+                    INSERT INTO job_runs
+                      (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                    VALUES (?, ?, 'succeeded', 'scheduler', ?, ?, '{}')
+                    """,
+                    ("1326428061876371456", job_type, completed_at, completed_at),
+                )
+            dashboard = market_app.admin_dashboard_payload(conn, "1326428061876371456")
+
+        self.assertEqual(dashboard["automation"]["live_scores"]["state"], "healthy")
+        self.assertEqual(dashboard["automation"]["lifecycle"]["state"], "healthy")
+        job_titles = {action["title"] for action in dashboard["actions"] if action["type"] == "job_retry"}
+        self.assertNotIn("Live scoring marks needs attention", job_titles)
+        self.assertNotIn("Market lifecycle needs attention", job_titles)
+
+    def test_admin_dashboard_uses_per_job_success_after_scheduler_churn(self):
+        self.seed()
+        old_model_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        pipeline_success = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        fresh_success = datetime.now(timezone.utc).isoformat()
+        with market_app.db() as conn:
+            conn.execute("UPDATE model_runs SET created_at = ?", (old_model_time,))
+            conn.execute("UPDATE ingestion_runs SET fetched_at = ? WHERE dataset = 'weekly_projections'", (old_model_time,))
+            for job_type, completed_at in (
+                ("pipeline", pipeline_success),
+                ("live_scores", fresh_success),
+                ("backup", fresh_success),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO job_runs
+                      (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                    VALUES (?, ?, 'succeeded', 'scheduler', ?, ?, '{}')
+                    """,
+                    ("1326428061876371456", job_type, completed_at, completed_at),
+                )
+            for index in range(101):
+                completed_at = (datetime.now(timezone.utc) - timedelta(minutes=101 - index)).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO job_runs
+                      (league_id, job_type, status, triggered_by, started_at, completed_at, result_json)
+                    VALUES (?, 'lifecycle', 'succeeded', 'scheduler', ?, ?, '{}')
+                    """,
+                    ("1326428061876371456", completed_at, completed_at),
+                )
+            dashboard = market_app.admin_dashboard_payload(conn, "1326428061876371456")
+
+        self.assertEqual(dashboard["automation"]["pipeline"]["state"], "healthy")
+        job_titles = {action["title"] for action in dashboard["actions"] if action["type"] == "job_retry"}
+        self.assertNotIn("Data pipeline needs attention", job_titles)
+
     def test_scheduled_endpoint_runs_lifecycle_and_skips_fresh_daily_jobs(self):
         self.seed()
         with market_app.db() as conn:

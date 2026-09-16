@@ -88,6 +88,7 @@ LEAGUE_MARKET_ADMIN_CODE=<16+ character private admin code>
 LEAGUE_MARKET_ALLOWED_HOSTS=<your-app>.vercel.app
 LEAGUE_MARKET_ALLOWED_ORIGINS=https://<your-app>.vercel.app
 LEAGUE_MARKET_SCHEDULE_PIPELINE=0
+LEAGUE_MARKET_AUTOMATION_DASHBOARD_GRACE_HOURS=1
 TURSO_DATABASE_URL=libsql://...
 TURSO_AUTH_TOKEN=...
 LEAGUE_MARKET_DATA_DIR=/tmp/league-market
@@ -105,6 +106,7 @@ Runtime settings:
 - `LEAGUE_MARKET_BACKUP_DIR`: SQLite online backups
 - `LEAGUE_MARKET_SIMULATIONS`: deterministic Monte Carlo sample count; default `20000`
 - `LEAGUE_MARKET_SCHEDULE_PIPELINE`: set `0` to keep scheduled automation from running the heavier model pipeline
+- `LEAGUE_MARKET_AUTOMATION_DASHBOARD_GRACE_HOURS`: stale-alert window for frequent scheduler jobs; default `1`
 - `LEAGUE_MARKET_INVITE_CODE`: 12+ characters in production
 - `LEAGUE_MARKET_ADMIN_CODE`: 16+ characters in production
 - `LEAGUE_MARKET_ALLOWED_HOSTS`: comma-separated HTTP hostnames
