@@ -133,6 +133,8 @@ The included `.github/workflows/league-market-scheduler.yml` provides that sched
 - `LEAGUE_MARKET_URL`: the public HTTPS origin, without an API path
 - `LEAGUE_MARKET_ADMIN_CODE`: the production admin code
 
+The separate `League Market Production Pipeline` workflow runs the heavier data and model refresh on a GitHub-hosted runner instead of inside Vercel's request window. Add `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` as repository secrets, then run the workflow manually from the Actions tab whenever Admin reports that the data pipeline needs attention. Its optional simulation-count input defaults to `20000`.
+
 The individual pipeline, live score mark, lifecycle, backup, and prune endpoints remain available for focused retries.
 
 ## Restore Drill

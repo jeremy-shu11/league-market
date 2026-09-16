@@ -1,0 +1,70 @@
+name: League Market Production Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      simulations:
+        description: Monte Carlo simulation count
+        required: false
+        default: "20000"
+
+concurrency:
+  group: league-market-production-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh-production-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LEAGUE_MARKET_ENV: production
+      LEAGUE_MARKET_LEAGUE_ID: "1326428061876371456"
+      LEAGUE_MARKET_DATA_DIR: /tmp/league-market
+      LEAGUE_MARKET_SIMULATIONS: ${{ inputs.simulations }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate production database secrets
+        run: |
+          set -euo pipefail
+          test -n "$TURSO_DATABASE_URL"
+          test -n "$TURSO_AUTH_TOKEN"
+
+      - name: Install pipeline dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Refresh production model and markets
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import json
+
+          import app
+
+          app.execute_schema()
+          result = app.run_tracked_job(
+              app.DEFAULT_LEAGUE_ID,
+              "pipeline",
+              "github-actions",
+              lambda: app.execute_live_pipeline(app.DEFAULT_LEAGUE_ID),
+          )
+          summary = {
+              "league_id": result.get("league_id"),
+              "season": result.get("season"),
+              "week": result.get("week"),
+              "model": result.get("model"),
+              "markets": result.get("markets"),
+          }
+          print(json.dumps(summary, indent=2, default=str))
+          PY
+

@@ -4535,7 +4535,7 @@ def run_tracked_job(
         run_id = int(cursor.lastrowid)
     try:
         result = operation()
-    except Exception as error:
+    except BaseException as error:
         with db() as conn:
             conn.execute(
                 "UPDATE job_runs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",

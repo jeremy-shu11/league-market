@@ -229,6 +229,28 @@ class ApiTests(unittest.TestCase):
         else:
             self.assertRegex(index.text, r"/static/app\.js\?v=[0-9a-f]{12}")
 
+    def test_tracked_job_records_an_interrupted_operation_as_failed(self):
+        def interrupt():
+            raise KeyboardInterrupt("runner stopped")
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "runner stopped"):
+            market_app.run_tracked_job(
+                "1326428061876371456",
+                "pipeline",
+                "github-actions",
+                interrupt,
+            )
+
+        with market_app.db() as conn:
+            job = conn.execute(
+                "SELECT status, triggered_by, completed_at, error FROM job_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["triggered_by"], "github-actions")
+        self.assertIsNotNone(job["completed_at"])
+        self.assertEqual(job["error"], "runner stopped")
+
     def seed(self):
         payload, projections = self.modeled_fixture()
         with market_app.db() as conn:
