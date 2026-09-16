@@ -130,6 +130,26 @@ class ConfigTests(unittest.TestCase):
             "admin-code-with-more-entropy",
         )
 
+    def test_remote_database_commit_syncs_replica(self):
+        class FakeRemoteConnection:
+            in_transaction = False
+
+            def __init__(self):
+                self.commits = 0
+                self.syncs = 0
+
+            def commit(self):
+                self.commits += 1
+
+            def sync(self):
+                self.syncs += 1
+
+        fake = FakeRemoteConnection()
+        conn = market_app.RemoteDatabaseConnection(fake)
+        conn.commit()
+        self.assertEqual(fake.commits, 1)
+        self.assertEqual(fake.syncs, 1)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):

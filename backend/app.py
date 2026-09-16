@@ -467,6 +467,9 @@ class RemoteDatabaseConnection:
 
     def commit(self) -> None:
         self._connection.commit()
+        sync = getattr(self._connection, "sync", None)
+        if callable(sync):
+            sync()
 
     def rollback(self) -> None:
         self._connection.rollback()
