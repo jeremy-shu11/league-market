@@ -2017,7 +2017,10 @@ def create_market(
             created_at if status == "open" else None,
         ),
     )
-    market_id = cursor.lastrowid
+    market_row = conn.execute("SELECT id FROM markets WHERE source_key = ?", (source_key,)).fetchone()
+    if not market_row:
+        raise RuntimeError(f"Market insert did not persist: {source_key}")
+    market_id = int(market_row["id"])
     outcome_ids = []
     for index, ((label, source_ref), prior) in enumerate(zip(outcome_labels, normalized_priors)):
         outcome_cursor = conn.execute(
@@ -2028,7 +2031,13 @@ def create_market(
             """,
             (market_id, label, source_ref, index, prior, prior),
         )
-        outcome_ids.append(int(outcome_cursor.lastrowid))
+        outcome_row = conn.execute(
+            "SELECT id FROM outcomes WHERE market_id = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (market_id, source_ref),
+        ).fetchone()
+        if not outcome_row:
+            raise RuntimeError(f"Outcome insert did not persist: {source_ref}")
+        outcome_ids.append(int(outcome_row["id"]))
     event_cursor = conn.execute(
         """
         INSERT INTO market_events (market_id, event_type, actor_type, revision, payload_json, created_at)
@@ -2041,6 +2050,13 @@ def create_market(
             created_at,
         ),
     )
+    event_row = conn.execute(
+        "SELECT id FROM market_events WHERE market_id = ? AND revision = 0",
+        (market_id,),
+    ).fetchone()
+    if not event_row:
+        raise RuntimeError(f"Opening event did not persist for market {market_id}")
+    event_id = int(event_row["id"])
     for outcome_id, prior in zip(outcome_ids, normalized_priors):
         conn.execute(
             """
@@ -2048,7 +2064,7 @@ def create_market(
               (market_id, outcome_id, event_id, market_probability, model_probability, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (market_id, outcome_id, event_cursor.lastrowid, prior, prior, created_at),
+            (market_id, outcome_id, event_id, prior, prior, created_at),
         )
     return int(market_id)
 
