@@ -15,7 +15,7 @@ on:
         default: "20000"
 
 concurrency:
-  group: league-market-production-pipeline
+  group: league-market-production-pipeline-v2
   cancel-in-progress: true
 
 permissions:
