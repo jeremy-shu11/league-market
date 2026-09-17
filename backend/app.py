@@ -1809,21 +1809,12 @@ def sync_snapshot(conn: sqlite3.Connection, snapshot: dict, league_id: str) -> d
         artifact_dir=RAW_DATA_DIR,
     )
 
+    player_rows = []
     for player_id, player in players_by_id.items():
         name = player.get("full_name") or " ".join(
             part for part in [player.get("first_name"), player.get("last_name")] if part
         )
-        conn.execute(
-            """
-            INSERT INTO nfl_players (player_id, full_name, position, team, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(player_id) DO UPDATE SET
-              full_name = excluded.full_name,
-              position = excluded.position,
-              team = excluded.team,
-              status = excluded.status,
-              updated_at = excluded.updated_at
-            """,
+        player_rows.append(
             (
                 str(player_id),
                 name or str(player_id),
@@ -1831,8 +1822,21 @@ def sync_snapshot(conn: sqlite3.Connection, snapshot: dict, league_id: str) -> d
                 player.get("team"),
                 player.get("status"),
                 created_at,
-            ),
+            )
         )
+    conn.executemany(
+        """
+        INSERT INTO nfl_players (player_id, full_name, position, team, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(player_id) DO UPDATE SET
+          full_name = excluded.full_name,
+          position = excluded.position,
+          team = excluded.team,
+          status = excluded.status,
+          updated_at = excluded.updated_at
+        """,
+        player_rows,
+    )
 
     managers = manager_records_from_snapshot(snapshot, league_id)
     store_manager_records(conn, managers, created_at)
