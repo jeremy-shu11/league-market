@@ -1,5 +1,5 @@
 name: League Market Production Pipeline
-run-name: Production pipeline (${{ github.event_name }}, batched writes)
+run-name: Production pipeline (${{ github.event_name }}, roster data)
 
 on:
   push:

@@ -1809,15 +1809,21 @@ def sync_snapshot(conn: sqlite3.Connection, snapshot: dict, league_id: str) -> d
         artifact_dir=RAW_DATA_DIR,
     )
 
+    rostered_player_ids = {
+        str(player_id)
+        for roster in rosters
+        for player_id in (roster.get("players") or [])
+    }
     player_rows = []
-    for player_id, player in players_by_id.items():
+    for player_id in sorted(rostered_player_ids):
+        player = players_by_id.get(player_id) or {}
         name = player.get("full_name") or " ".join(
             part for part in [player.get("first_name"), player.get("last_name")] if part
         )
         player_rows.append(
             (
-                str(player_id),
-                name or str(player_id),
+                player_id,
+                name or player_id,
                 player.get("position") or "UNK",
                 player.get("team"),
                 player.get("status"),
