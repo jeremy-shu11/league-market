@@ -28,7 +28,7 @@ jobs:
       LEAGUE_MARKET_ENV: production
       LEAGUE_MARKET_LEAGUE_ID: "1326428061876371456"
       LEAGUE_MARKET_DATA_DIR: /tmp/league-market
-      LEAGUE_MARKET_SIMULATIONS: ${{ inputs.simulations }}
+      LEAGUE_MARKET_SIMULATIONS: ${{ inputs.simulations || '20000' }}
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
     steps:
