@@ -448,8 +448,9 @@ class RemoteDatabaseCursor:
 
 
 class RemoteDatabaseConnection:
-    def __init__(self, connection):
+    def __init__(self, connection, sync_on_commit: bool = True):
         self._connection = connection
+        self._sync_on_commit = sync_on_commit
 
     @property
     def in_transaction(self) -> bool:
@@ -468,7 +469,7 @@ class RemoteDatabaseConnection:
     def commit(self) -> None:
         self._connection.commit()
         sync = getattr(self._connection, "sync", None)
-        if callable(sync):
+        if self._sync_on_commit and callable(sync):
             sync()
 
     def rollback(self) -> None:
@@ -507,7 +508,7 @@ def db():
             auth_token=TURSO_AUTH_TOKEN,
         )
         connection.execute("PRAGMA foreign_keys = ON")
-        return RemoteDatabaseConnection(connection)
+        return RemoteDatabaseConnection(connection, sync_on_commit=False)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row

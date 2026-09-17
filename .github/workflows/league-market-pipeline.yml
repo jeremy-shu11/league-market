@@ -1,5 +1,5 @@
 name: League Market Production Pipeline
-run-name: Production pipeline (${{ github.event_name }})
+run-name: Production pipeline (${{ github.event_name }}, direct remote)
 
 on:
   push:

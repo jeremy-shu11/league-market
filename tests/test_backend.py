@@ -150,6 +150,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(fake.commits, 1)
         self.assertEqual(fake.syncs, 1)
 
+    def test_remote_database_commit_skips_replica_sync_in_direct_mode(self):
+        class FakeRemoteConnection:
+            def __init__(self):
+                self.commits = 0
+                self.syncs = 0
+
+            def commit(self):
+                self.commits += 1
+
+            def sync(self):
+                self.syncs += 1
+
+        fake = FakeRemoteConnection()
+        conn = market_app.RemoteDatabaseConnection(fake, sync_on_commit=False)
+        conn.commit()
+        self.assertEqual(fake.commits, 1)
+        self.assertEqual(fake.syncs, 0)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
