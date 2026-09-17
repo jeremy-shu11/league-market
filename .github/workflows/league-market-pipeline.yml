@@ -1,4 +1,5 @@
 name: League Market Production Pipeline
+run-name: Production pipeline (${{ github.event_name }})
 
 on:
   push:
