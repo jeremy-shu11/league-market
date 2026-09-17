@@ -502,11 +502,10 @@ def db():
             import libsql
         except ImportError as error:
             raise RuntimeError("Install the libsql package to use TURSO_DATABASE_URL") from error
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        connection = libsql.connect(str(DB_PATH), sync_url=remote_database_url(), auth_token=TURSO_AUTH_TOKEN)
-        sync = getattr(connection, "sync", None)
-        if callable(sync):
-            sync()
+        connection = libsql.connect(
+            database=remote_database_url(),
+            auth_token=TURSO_AUTH_TOKEN,
+        )
         connection.execute("PRAGMA foreign_keys = ON")
         return RemoteDatabaseConnection(connection)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)

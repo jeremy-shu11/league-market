@@ -102,7 +102,7 @@ Runtime settings:
 - `LEAGUE_MARKET_ENV`: `development`, `test`, or `production`
 - `LEAGUE_MARKET_HOST` / `LEAGUE_MARKET_PORT`: bind address and port
 - `LEAGUE_MARKET_DB`: persistent SQLite file path
-- `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`: optional remote libSQL database for serverless hosts
+- `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`: optional direct remote libSQL database for serverless hosts and automation runners
 - `LEAGUE_MARKET_RAW_DATA`: content-addressed gzip ingestion artifacts
 - `LEAGUE_MARKET_BACKUP_DIR`: SQLite online backups
 - `LEAGUE_MARKET_SIMULATIONS`: deterministic Monte Carlo sample count; default `20000`
